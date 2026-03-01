@@ -198,18 +198,50 @@ var require_quality_helper = __commonJS({
   }
 });
 
-// src/provider_urls.js
+// provider_urls.json
 var require_provider_urls = __commonJS({
+  "provider_urls.json"(exports2, module2) {
+    module2.exports = {
+      animeunity: "https://www.animeunity.so",
+      animeworld: "https://www.animeworld.ac",
+      animesaturn: "https://www.animesaturn.cx",
+      streamingcommunity: "https://vixsrc.to",
+      guardahd: "https://guardahd.stream",
+      guardaserie: "https://guardaserietv.autos",
+      guardoserie: "https://guardoserie.space",
+      mapping_api: "https://animemapping.stremio.dpdns.org"
+    };
+  }
+});
+
+// src/provider_urls.js
+var require_provider_urls2 = __commonJS({
   "src/provider_urls.js"(exports2, module2) {
     "use strict";
-    var fs = require("fs");
-    var path = require("path");
-    var PROVIDER_URLS_FILE = process.env.PROVIDER_URLS_FILE ? path.resolve(process.env.PROVIDER_URLS_FILE) : path.resolve(__dirname, "..", "provider_urls.json");
-    var RELOAD_INTERVAL_MS = Number.parseInt(process.env.PROVIDER_URLS_RELOAD_MS || "1500", 10) || 1500;
+    function safeRequire(moduleName) {
+      try {
+        return require(moduleName);
+      } catch (e) {
+        return null;
+      }
+    }
+    var fs = safeRequire("fs");
+    var path = safeRequire("path");
+    var embeddedProviderUrls = {};
+    try {
+      embeddedProviderUrls = require_provider_urls();
+    } catch (e) {
+      embeddedProviderUrls = {};
+    }
+    var env = typeof process !== "undefined" && process && typeof process.env === "object" && process.env ? process.env : {};
+    var configuredProviderUrlsFile = String(env.PROVIDER_URLS_FILE || "").trim();
+    var defaultProviderUrlsFile = path && typeof __dirname !== "undefined" ? path.resolve(__dirname, "..", "provider_urls.json") : "";
+    var PROVIDER_URLS_FILE = configuredProviderUrlsFile ? path ? path.resolve(configuredProviderUrlsFile) : configuredProviderUrlsFile : defaultProviderUrlsFile;
+    var RELOAD_INTERVAL_MS = Number.parseInt(String(env.PROVIDER_URLS_RELOAD_MS || "1500"), 10) || 1500;
     var DEFAULT_PROVIDER_URLS_URL = "https://raw.githubusercontent.com/realbestia1/easystreams/refs/heads/main/provider_urls.json";
-    var PROVIDER_URLS_URL = String(process.env.PROVIDER_URLS_URL || DEFAULT_PROVIDER_URLS_URL).trim();
-    var REMOTE_RELOAD_INTERVAL_MS = Number.parseInt(process.env.PROVIDER_URLS_REMOTE_RELOAD_MS || "10000", 10) || 1e4;
-    var REMOTE_FETCH_TIMEOUT_MS = Number.parseInt(process.env.PROVIDER_URLS_REMOTE_TIMEOUT_MS || "5000", 10) || 5e3;
+    var PROVIDER_URLS_URL = String(env.PROVIDER_URLS_URL || DEFAULT_PROVIDER_URLS_URL).trim();
+    var REMOTE_RELOAD_INTERVAL_MS = Number.parseInt(String(env.PROVIDER_URLS_REMOTE_RELOAD_MS || "10000"), 10) || 1e4;
+    var REMOTE_FETCH_TIMEOUT_MS = Number.parseInt(String(env.PROVIDER_URLS_REMOTE_TIMEOUT_MS || "5000"), 10) || 5e3;
     var ALIASES = {
       animeunity: ["animeunuty", "anime_unity"],
       animeworld: ["anime_world"],
@@ -245,6 +277,7 @@ var require_provider_urls = __commonJS({
       return out;
     }
     function reloadProviderUrlsIfNeeded(force = false) {
+      if (!fs || !PROVIDER_URLS_FILE) return;
       const now = Date.now();
       if (!force && now - lastCheckAt < RELOAD_INTERVAL_MS) return;
       lastCheckAt = now;
@@ -271,11 +304,7 @@ var require_provider_urls = __commonJS({
     }
     function getFetchImpl() {
       if (typeof fetch === "function") return fetch.bind(globalThis);
-      try {
-        return require("node-fetch");
-      } catch (e) {
-        return null;
-      }
+      return null;
     }
     function refreshProviderUrlsFromRemoteIfNeeded(force = false) {
       return __async(this, null, function* () {
@@ -353,6 +382,7 @@ var require_provider_urls = __commonJS({
       getProviderUrlsFilePath,
       getProviderUrlsSourceUrl
     };
+    lastData = toNormalizedMap(embeddedProviderUrls);
   }
 });
 
@@ -391,7 +421,7 @@ var require_fetch_helper = __commonJS({
 // src/animeworld/index.js
 var { formatStream } = require_formatter();
 var { checkQualityFromPlaylist } = require_quality_helper();
-var { getProviderUrl } = require_provider_urls();
+var { getProviderUrl } = require_provider_urls2();
 require_fetch_helper();
 function getWorldBaseUrl() {
   return getProviderUrl(
@@ -518,7 +548,7 @@ function inferSourceTag(title, animePath) {
   const titleText = String(title || "").toLowerCase();
   const pathText = String(animePath || "").toLowerCase();
   if (/(?:^|[^\w])ita(?:[^\w]|$)/i.test(titleText)) return "ITA";
-  if (/(?:^|[-_/])ita(?:[-_/]|$)/i.test(pathText)) return "ITA";
+  if (/(?:^|[-_/])ita(?:[-_/.?]|$)/i.test(pathText)) return "ITA";
   return "SUB";
 }
 function resolveLanguageEmoji(sourceTag) {
@@ -587,6 +617,12 @@ function extractQualityHint(value) {
   const text = String(value || "");
   const match = text.match(/(\d{3,4}p)/i);
   return match ? match[1] : "Unknown";
+}
+function normalizeAnimeWorldQuality(value) {
+  const text = String(value || "").trim();
+  if (!text) return "720p";
+  if (/^(?:unknown|unknow|auto)$/i.test(text)) return "720p";
+  return text;
 }
 function collectMediaLinksFromHtml(html) {
   const links = [];
@@ -930,7 +966,7 @@ function extractStreamsFromAnimePath(animePath, requestedEpisode, mediaType = "t
         server: serverName,
         url: mediaUrl,
         language: streamLanguage,
-        quality,
+        quality: normalizeAnimeWorldQuality(quality),
         headers: {
           "User-Agent": USER_AGENT,
           Referer: animeUrl
@@ -979,7 +1015,7 @@ function extractStreamsFromAnimePath(animePath, requestedEpisode, mediaType = "t
               server: serverName,
               url: mediaUrl,
               language: streamLanguage,
-              quality,
+              quality: normalizeAnimeWorldQuality(quality),
               headers: {
                 "User-Agent": USER_AGENT,
                 Referer: animeUrl
