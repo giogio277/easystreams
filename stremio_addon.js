@@ -1464,7 +1464,7 @@ app.get('/', (req, res) => {
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>${manifest.name} - Stremio Addon</title>
+        <title>Stremio Addon</title>
         <style>
             :root {
                 --purple: #8A5AAB;
@@ -1660,26 +1660,20 @@ app.get('/', (req, res) => {
                 <div class="addon-logo">
                     📺
                 </div>
-                <h1>${manifest.name}</h1>
+                <h1>Stremio</h1>
                 <div class="version">Version ${manifest.version}</div>
                 <p class="description">
                     ${manifest.description}
                 </p>
                 
-                <div class="providers-title">Active Providers</div>
-                <div class="providers-list">
-                    ${providersHtml}
-                </div>
+                
 
                 <a id="installLink" href="#" class="install-btn">INSTALL ADDON</a>
                 <button id="copyLink" class="copy-btn">📋 Copy Link</button>
             </div>
         </div>
 
-        <div class="footer">
-            Powered by <a href="https://github.com/realbestia1/" target="_blank">realbestia</a>
-        </div>
-
+     
         <script>
             // Dynamic Install Link
             const currentHost = window.location.host;
