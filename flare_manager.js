@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const util = require('util');
 const execAsync = util.promisify(exec);
+const { sanitizeLogText } = require('./src/utils/log_sanitizer');
 
 class FlareSolverrManager {
     constructor() {
@@ -11,6 +12,44 @@ class FlareSolverrManager {
         this.zipPath = path.join(__dirname, 'flaresolverr.zip');
         this.isStarting = false;
         this.port = '8191';
+    }
+
+    getLocalExecutablePath() {
+        const isWin = process.platform === 'win32';
+        let exePath = isWin
+            ? path.join(this.fsDir, 'flaresolverr.exe')
+            : path.join(this.fsDir, 'flaresolverr');
+
+        if (!isWin && fs.existsSync(exePath) && fs.statSync(exePath).isDirectory()) {
+            exePath = path.join(exePath, 'flaresolverr');
+        }
+
+        if (isWin && !fs.existsSync(exePath)) {
+            exePath = path.join(this.fsDir, 'flaresolverr', 'flaresolverr.exe');
+        }
+
+        return exePath;
+    }
+
+    isLocalRuntimeValid() {
+        if (process.env.IN_DOCKER === 'true') return true;
+
+        const exePath = this.getLocalExecutablePath();
+        if (!fs.existsSync(exePath)) return false;
+
+        if (process.platform !== 'win32') return true;
+
+        const internalDir = path.join(path.dirname(exePath), '_internal');
+        if (!fs.existsSync(internalDir)) return false;
+
+        const hasPythonDll = fs.existsSync(path.join(internalDir, 'python313.dll'))
+            || fs.existsSync(path.join(internalDir, 'python312.dll'))
+            || fs.existsSync(path.join(internalDir, 'python311.dll'))
+            || fs.existsSync(path.join(internalDir, 'python310.dll'));
+        const hasPythonStdlib = fs.existsSync(path.join(internalDir, 'base_library.zip'))
+            || fs.existsSync(path.join(internalDir, 'encodings'));
+
+        return hasPythonDll && hasPythonStdlib;
     }
 
     async execCommand(command, cwd = process.cwd()) {
@@ -22,6 +61,34 @@ class FlareSolverrManager {
         }
     }
 
+    async cleanupWindowsDriverLocks() {
+        if (process.platform !== 'win32') return;
+
+        const appData = process.env.APPDATA || '';
+        const ucDir = appData ? path.join(appData, 'undetected_chromedriver') : '';
+        const escapedRoot = __dirname.replace(/'/g, "''").toLowerCase();
+        const escapedUcDir = ucDir.replace(/'/g, "''").toLowerCase();
+
+        try {
+            await execAsync(`powershell -NoProfile -Command "$targets = Get-CimInstance Win32_Process | Where-Object { $p = ($_.ExecutablePath + '').ToLower(); ($_.Name -in @('chrome.exe','chromedriver.exe','flaresolverr.exe')) -and ($p.StartsWith('${escapedRoot}') -or $p.StartsWith('${escapedUcDir}')) }; foreach ($t in $targets) { Stop-Process -Id $t.ProcessId -Force -ErrorAction SilentlyContinue }"`);
+        } catch (e) {
+            console.error('[FlareSolverr] Pulizia processi driver non riuscita:', e.message);
+        }
+
+        if (!ucDir || !fs.existsSync(ucDir)) return;
+
+        for (const file of ['chromedriver.exe', 'undetected_chromedriver.exe']) {
+            const filePath = path.join(ucDir, file);
+            if (!fs.existsSync(filePath)) continue;
+            try {
+                fs.unlinkSync(filePath);
+                console.log(`[FlareSolverr] Rimosso driver cache bloccabile: ${filePath}`);
+            } catch (e) {
+                console.error(`[FlareSolverr] Impossibile rimuovere ${filePath}: ${e.message}`);
+            }
+        }
+    }
+
     async start() {
         if (this.process) return;
         if (this.isStarting) return;
@@ -30,7 +97,20 @@ class FlareSolverrManager {
         const isWin = process.platform === 'win32';
 
         try {
-            if (!fs.existsSync(this.fsDir) && process.env.IN_DOCKER !== 'true') {
+            if (isWin) {
+                await this.cleanupWindowsDriverLocks();
+            }
+
+            const needsInstall = process.env.IN_DOCKER !== 'true' && (!fs.existsSync(this.fsDir) || !this.isLocalRuntimeValid());
+            if (needsInstall) {
+                if (fs.existsSync(this.fsDir)) {
+                    console.log('[FlareSolverr] Installazione locale corrotta o incompleta, reinstallazione in corso...');
+                    try {
+                        fs.rmSync(this.fsDir, { recursive: true, force: true });
+                    } catch (e) {
+                        console.error('[FlareSolverr] Impossibile rimuovere installazione corrotta:', e.message);
+                    }
+                }
                 console.log('[FlareSolverr] Installazione automatica in corso...');
                 let downloadUrl;
                 if (isWin) {
@@ -124,17 +204,7 @@ class FlareSolverrManager {
                 console.log('[FlareSolverr] Avvio da sorgenti Python (Docker Mode)...');
             } else {
                 // Su Windows o installazione locale manuale
-                exePath = isWin 
-                    ? path.join(this.fsDir, 'flaresolverr.exe')
-                    : path.join(this.fsDir, 'flaresolverr');
-                
-                if (!isWin && fs.existsSync(exePath) && fs.statSync(exePath).isDirectory()) {
-                    exePath = path.join(exePath, 'flaresolverr');
-                }
-
-                if (isWin && !fs.existsSync(exePath)) {
-                    exePath = path.join(this.fsDir, 'flaresolverr', 'flaresolverr.exe');
-                }
+                exePath = this.getLocalExecutablePath();
 
                 if (!fs.existsSync(exePath)) {
                     console.error('[FlareSolverr] Eseguibile non trovato in:', exePath);
@@ -151,10 +221,12 @@ class FlareSolverrManager {
             }
 
             try {
+                const browserTimeout = String(process.env.FLARE_BROWSER_TIMEOUT_MS || process.env.BROWSER_TIMEOUT || '40000');
+                const logLevel = String(process.env.FLARE_LOG_LEVEL || 'info');
                 this.process = spawn(exePath, spawnArgs, {
                     cwd: process.env.IN_DOCKER === 'true' ? '/app/flaresolverr-src' : path.dirname(exePath),
                     stdio: 'pipe',
-                    env: { ...process.env, PORT: this.port, HOST: '0.0.0.0', LOG_LEVEL: 'info', HEADLESS: 'true', BROWSER_TIMEOUT: '60000' },
+                    env: { ...process.env, PORT: this.port, HOST: '0.0.0.0', LOG_LEVEL: logLevel, HEADLESS: 'true', BROWSER_TIMEOUT: browserTimeout },
                     shell: !isWin
                 });
             } catch (spawnError) {
@@ -198,12 +270,12 @@ class FlareSolverrManager {
                 this.isStarting = false;
                 resolve();
             }
-            console.log('[FlareSolverr-Log]', output.trim());
+            console.log('[FlareSolverr-Log]', sanitizeLogText(output.trim()));
         });
 
         this.process.stderr.on('data', (data) => {
             const output = data.toString();
-            console.error('[FlareSolverr-Stderr]', output.trim());
+            console.error('[FlareSolverr-Stderr]', sanitizeLogText(output.trim()));
             if (output.includes('address already in use')) {
                 console.log('[FlareSolverr] Porta 8191 già in uso (stderr), utilizzo istanza esistente.');
                 this.isStarting = false;

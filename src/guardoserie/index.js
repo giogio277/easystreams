@@ -20,8 +20,7 @@ if (!IS_SERVER) {
         }
     };
     // Interrompiamo l'esecuzione qui per il client, il resto è logica server-only
-    return;
-}
+} else {
 
 // SIAMO SU SERVER: carichiamo le librerie pesanti
 const { smartFetch } = require('../utils/cf_handler');
@@ -29,7 +28,7 @@ const { USER_AGENT, getProxiedUrl } = require('../extractors/common');
 const { extractLoadm, extractUqload, extractDropLoad, extractMixDrop, extractSuperVideo } = require('../extractors');
 const STEP_BENCH_ENABLED = String(process.env.PROVIDER_STEP_BENCH || '').trim().toLowerCase() === '1';
 function getGuardoserieBaseUrl() {
-    return 'https://guardoserie.team';
+    return 'https://guardoserie.run';
 }
 const TMDB_API_KEY = '68e094699525b18a70bab2f86b1fa706';
 function getMappingApiUrl() {
@@ -482,7 +481,7 @@ async function getStreams(id, type, season, episode, providerContext = null) {
 
             const ajaxResults = ajaxHtml ? extractSearchResultsFromHtml(ajaxHtml, baseUrl) : [];
             const fallbackResults = fallbackHtml ? extractSearchResultsFromHtml(fallbackHtml, baseUrl) : [];
-            
+
             const results = [...ajaxResults, ...fallbackResults];
             mark('search_query_done', { q: query, ms: Date.now() - searchStartedAt, results: results.length });
             return results;
@@ -544,7 +543,7 @@ async function getStreams(id, type, season, episode, providerContext = null) {
                 const pageHtml = await smartFetch(result.url, getGuardoserieBaseUrl(), {
                     provider: 'guardoserie'
                 });
-                
+
                 let foundYear = null;
                 const pubYearMatch = pageHtml.match(/pubblicazione.*?release-year\/(\d{4})/i);
                 if (pubYearMatch) foundYear = pubYearMatch[1];
@@ -572,7 +571,7 @@ async function getStreams(id, type, season, episode, providerContext = null) {
 
         const verifiedResults = (await Promise.all(verificationPromises)).filter(Boolean);
         verifiedResults.sort((a, b) => b.score - a.score);
-        
+
         if (verifiedResults.length > 0) {
             targetUrl = verifiedResults[0].url;
         }
@@ -741,3 +740,4 @@ async function getStreams(id, type, season, episode, providerContext = null) {
 }
 
 module.exports = { getStreams };
+}

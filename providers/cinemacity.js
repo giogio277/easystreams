@@ -96,7 +96,7 @@ var require_formatter = __commonJS({
       else if (quality === "1080p") quality = "\u{1F680} FHD";
       else if (quality === "720p") quality = "\u{1F4BF} HD";
       else if (quality === "576p" || quality === "480p" || quality === "360p" || quality === "240p") quality = "\u{1F4A9} Low Quality";
-      else if (!quality || ["auto", "unknown", "unknow"].includes(String(quality).toLowerCase())) quality = "Unknow";
+      else if (!quality || ["auto", "unknown", "unknow"].includes(String(quality).toLowerCase())) quality = "\u{1F4BF} HD";
       let title = `\u{1F4C1} ${stream.title || "Stream"}`;
       let language = stream.language;
       if (!language) {
@@ -286,186 +286,20 @@ var require_quality_helper = __commonJS({
   }
 });
 
-// cf_bypass.js
-var require_cf_bypass = __commonJS({
-  "cf_bypass.js"(exports2, module2) {
-    var fs = require("fs");
-    var axios = require("axios");
-    var activeBypasses = /* @__PURE__ */ new Map();
-    function getClearance(_0) {
-      return __async(this, arguments, function* (url, provider = "default", options = {}) {
-        const sessionFile = `cf-session-${provider}.json`;
-        if (activeBypasses.has(provider)) {
-          console.log(`[CF] FlareSolverr bypass gi\xE0 in corso per il provider [${provider}], attendo...`);
-          return activeBypasses.get(provider);
-        }
-        const bypassPromise = (() => __async(null, null, function* () {
-          var _a;
-          const FLARE_URL = process.env.FLARE_URL || "http://127.0.0.1:8191/v1";
-          console.log(`[CF] Richiesta bypass a FlareSolverr: ${url}`);
-          const payload = {
-            cmd: options.method === "POST" ? "request.post" : "request.get",
-            url,
-            maxTimeout: 6e4
-          };
-          if (options.method === "POST" && options.body) {
-            payload.postData = options.body;
-          }
-          try {
-            const response = yield axios.post(FLARE_URL, payload, {
-              timeout: 7e4,
-              headers: { "Content-Type": "application/json" }
-            });
-            if (response.data && response.data.status === "ok") {
-              const solution = response.data.solution;
-              const cookies = solution.cookies.map((c) => `${c.name}=${c.value}`).join("; ");
-              const cf_clearance = (_a = solution.cookies.find((c) => c.name === "cf_clearance")) == null ? void 0 : _a.value;
-              const data = {
-                userAgent: solution.userAgent,
-                cookies,
-                cf_clearance: cf_clearance || null,
-                response: solution.response,
-                timestamp: Date.now()
-              };
-              fs.writeFileSync(sessionFile, JSON.stringify(data, null, 2));
-              console.log(`[CF] FlareSolverr: Bypass completato con successo per ${url}`);
-              return data;
-            } else {
-              const errorMsg = response.data ? response.data.message : "Risposta non valida da FlareSolverr";
-              throw new Error(errorMsg);
-            }
-          } catch (error) {
-            console.error(`[CF] Errore FlareSolverr: ${error.message}`);
-            if (error.code === "ECONNREFUSED") {
-              console.error(`[CF] ASSICURATI CHE FLARESOLVERR SIA ATTIVO SU ${FLARE_URL}`);
-            }
-            throw error;
-          } finally {
-            activeBypasses.delete(provider);
-          }
-        }))();
-        activeBypasses.set(provider, bypassPromise);
-        return bypassPromise;
-      });
-    }
-    module2.exports = { getClearance };
-  }
-});
-
-// src/utils/cf_handler.js
-var require_cf_handler = __commonJS({
-  "src/utils/cf_handler.js"(exports2, module2) {
-    var axios = require("axios");
-    var fs = require("fs");
-    var path = require("path");
-    var { getClearance } = require_cf_bypass();
-    var https = require("https");
-    var http = require("http");
-    var agentOptions = {
-      keepAlive: true,
-      maxSockets: 250,
-      maxFreeSockets: 100,
-      timeout: 3e4,
-      keepAliveMsecs: 3e4
-    };
-    var httpsAgent = new https.Agent(agentOptions);
-    var httpAgent = new http.Agent(agentOptions);
-    var requestCache = /* @__PURE__ */ new Map();
-    var CACHE_TTL = 6e5;
-    function smartFetch2(_0, _1) {
-      return __async(this, arguments, function* (url, domain, options = {}) {
-        const provider = options.provider || domain.replace(/https?:\/\//, "").split(".")[0];
-        const sessionFile = path.join(__dirname, `../../cf-session-${provider}.json`);
-        const cacheKey = `${options.method || "GET"}:${url}:${options.body || ""}`;
-        if (requestCache.has(cacheKey)) {
-          const cached = requestCache.get(cacheKey);
-          if (Date.now() - cached.timestamp < CACHE_TTL) {
-            return cached.data;
-          }
-        }
-        const loadSession = () => {
-          if (fs.existsSync(sessionFile)) {
-            try {
-              return JSON.parse(fs.readFileSync(sessionFile, "utf8"));
-            } catch (e) {
-              return {};
-            }
-          }
-          return {};
-        };
-        let session = loadSession();
-        const doRequest = (sess) => __async(null, null, function* () {
-          const mergedHeaders = __spreadValues({
-            "User-Agent": sess.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-            "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7"
-          }, options.headers);
-          if (sess.cookies) {
-            mergedHeaders.Cookie = sess.cookies;
-          }
-          const response = yield axios({
-            url,
-            method: options.method || "GET",
-            data: options.body,
-            headers: mergedHeaders,
-            httpsAgent,
-            httpAgent,
-            timeout: options.timeout || 2e4,
-            validateStatus: false
-          });
-          const data = response.data;
-          if (response.status >= 400 && response.status !== 403 && response.status !== 503) {
-            const err = new Error(`HTTP ${response.status}`);
-            err.response = { status: response.status, data };
-            throw err;
-          }
-          return { data, status: response.status };
-        });
-        try {
-          const res = yield doRequest(session);
-          if (res.status === 403 || res.status === 503) {
-            throw { response: res };
-          }
-          requestCache.set(cacheKey, { data: res.data, timestamp: Date.now() });
-          return res.data;
-        } catch (err) {
-          if (err.response && (err.response.status === 403 || err.response.status === 503)) {
-            console.warn(`[CF-HANDLER][${provider}] Blocco rilevato. Avvio bypass per ${url}...`);
-            const newSession = yield getClearance(url, provider, options);
-            const res = yield doRequest(newSession);
-            requestCache.set(cacheKey, { data: res.data, timestamp: Date.now() });
-            return res.data;
-          }
-          throw err;
-        }
-      });
-    }
-    module2.exports = { smartFetch: smartFetch2 };
-  }
-});
-
 // src/cinemacity/index.js
 var { formatStream } = require_formatter();
 var { checkQualityFromPlaylist } = require_quality_helper();
 var { fetchWithTimeout } = require_fetch_helper();
-var IS_SERVER = typeof process !== "undefined" && process.versions && process.versions.node;
-if (!IS_SERVER) {
-  module.exports = {
-    getStreams: (id, type, season, episode) => __async(null, null, function* () {
-      try {
-        const url = `https://easystreams.realbestia.com/resolve/cinemacity?id=${id}&type=${type}&s=${season || 1}&ep=${episode || 1}`;
-        const response = yield fetch(url);
-        const data = yield response.json();
-        return data.streams || [];
-      } catch (e) {
-        console.error("[CinemaCity-Client] API Error:", e.message);
-        return [];
-      }
-    })
-  };
-  return;
+var IS_SERVER = typeof process !== "undefined" && !!(process.versions && process.versions.node);
+var smartFetch = null;
+if (IS_SERVER) {
+  try {
+    const nodeRequire = eval("require");
+    ({ smartFetch } = nodeRequire("../utils/cf_handler.js"));
+  } catch (_) {
+    smartFetch = null;
+  }
 }
-var { smartFetch } = require_cf_handler();
 var BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
 function base64Decode(str) {
   try {
@@ -502,9 +336,12 @@ function base64Decode(str) {
   }
 }
 var BASE_URL = base64Decode("aHR0cHM6Ly9jaW5lbWFjaXR5LmNj");
-var USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+var USER_AGENT = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36";
 var FETCH_TIMEOUT = 1e4;
 var TMDB_API_KEY = "68e094699525b18a70bab2f86b1fa706";
+var SITEMAP_URL = `${BASE_URL}/news_pages.xml`;
+var SITEMAP_CACHE_MS = 60 * 60 * 1e3;
+var sitemapCache = null;
 function getMappingApiUrl() {
   return "https://animemapping.realbestia.com";
 }
@@ -521,6 +358,358 @@ function getMappingLanguage(providerContext = null) {
 function getSessionCookies() {
   const cookieB64 = "ZGxlX3VzZXJfaWQ9MzI3Mjk7IGRsZV9wYXNzd29yZD04OTQxNzFjNmE4ZGFiMThlZTU5NGQ1YzY1MjAwOWEzNTs=";
   return base64Decode(cookieB64);
+}
+function fetchHtml(_0) {
+  return __async(this, arguments, function* (url, headers = {}, options = {}) {
+    if (IS_SERVER && typeof smartFetch === "function") {
+      return yield smartFetch(url, BASE_URL, __spreadProps(__spreadValues({}, options), {
+        timeout: options.timeout || FETCH_TIMEOUT,
+        provider: "cinemacity",
+        headers: __spreadValues({
+          "User-Agent": USER_AGENT,
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+          "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7"
+        }, headers)
+      }));
+    }
+    const response = yield fetchWithTimeout(url, {
+      timeout: FETCH_TIMEOUT,
+      headers: __spreadValues({
+        "User-Agent": USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7"
+      }, headers)
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    return yield response.text();
+  });
+}
+function fetchHtmlNoBypass(_0) {
+  return __async(this, arguments, function* (url, headers = {}, options = {}) {
+    return yield fetchHtml(url, headers, __spreadProps(__spreadValues({}, options), {
+      skipBypassOnFailure: true
+    }));
+  });
+}
+function decodeHtmlEntities(str) {
+  return String(str || "").replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(Number(dec))).replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16))).replace(/&quot;/g, '"').replace(/&#039;/g, "'").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&ndash;|&mdash;/g, "-").replace(/\u2013|\u2014/g, "-");
+}
+function getHttpStatusFromError(error) {
+  var _a;
+  const responseStatus = Number.parseInt(String(((_a = error == null ? void 0 : error.response) == null ? void 0 : _a.status) || ""), 10);
+  if (Number.isInteger(responseStatus)) return responseStatus;
+  const match = String(error && error.message ? error.message : error).match(/HTTP\s+(\d+)/i);
+  return match ? Number.parseInt(match[1], 10) : null;
+}
+function isCloudflareBlockedError(error) {
+  var _a, _b, _c;
+  const message = [
+    error == null ? void 0 : error.message,
+    (_b = (_a = error == null ? void 0 : error.response) == null ? void 0 : _a.data) == null ? void 0 : _b.message,
+    (_c = error == null ? void 0 : error.response) == null ? void 0 : _c.data
+  ].filter(Boolean).join(" ");
+  return /Cloudflare has blocked this request|Error solving the challenge/i.test(message);
+}
+function normalizeTitle(value) {
+  return decodeHtmlEntities(String(value || "")).normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/\([^)]*\)/g, " ").replace(/[^a-z0-9]+/g, " ").trim();
+}
+function compactTitle(value) {
+  return normalizeTitle(value).replace(/\s+/g, "");
+}
+function extractYearFromMetadata(metadata) {
+  const date = (metadata == null ? void 0 : metadata.release_date) || (metadata == null ? void 0 : metadata.first_air_date) || "";
+  const year = Number.parseInt(String(date).slice(0, 4), 10);
+  return Number.isInteger(year) ? year : null;
+}
+function getSignificantTokens(value) {
+  const stopwords = /* @__PURE__ */ new Set([
+    "the",
+    "a",
+    "an",
+    "of",
+    "and",
+    "in",
+    "on",
+    "to",
+    "for",
+    "at",
+    "by",
+    "is",
+    "it",
+    "il",
+    "lo",
+    "la",
+    "gli",
+    "le",
+    "un",
+    "uno",
+    "una",
+    "di",
+    "da",
+    "del",
+    "della",
+    "dei",
+    "e",
+    "o",
+    "con",
+    "per",
+    "su",
+    "tra",
+    "fra"
+  ]);
+  return normalizeTitle(value).split(/\s+/).filter((token) => token.length > 1 && !stopwords.has(token));
+}
+function parseSitemapEntries(xml) {
+  const entries = [];
+  const regex = /<loc>(https:\/\/cinemacity\.cc\/(movies|tv-series)\/\d+-([a-z0-9-]+)\.html)<\/loc>/gi;
+  let match;
+  while ((match = regex.exec(String(xml || ""))) !== null) {
+    const url = match[1];
+    const kind = match[2];
+    const slug = match[3];
+    const yearMatch = slug.match(/-(\d{4})$/);
+    const year = yearMatch ? Number.parseInt(yearMatch[1], 10) : null;
+    const titleSlug = yearMatch ? slug.slice(0, -5) : slug;
+    const title = titleSlug.replace(/-/g, " ");
+    entries.push({
+      url,
+      kind,
+      title,
+      normalizedTitle: normalizeTitle(title),
+      compactTitle: compactTitle(title),
+      tokens: getSignificantTokens(title),
+      year: Number.isInteger(year) ? year : null
+    });
+  }
+  return entries;
+}
+function fetchSitemapEntries() {
+  return __async(this, null, function* () {
+    if (sitemapCache && sitemapCache.expiresAt > Date.now()) {
+      return sitemapCache.entries;
+    }
+    console.log("[CinemaCity] Fetching sitemap catalog...");
+    const cookies = getSessionCookies();
+    const response = yield fetchWithTimeout(SITEMAP_URL, {
+      timeout: FETCH_TIMEOUT,
+      headers: {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/xml,text/xml,text/html;q=0.9,*/*;q=0.8",
+        "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Referer": `${BASE_URL}/`,
+        "Cookie": cookies
+      }
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const xml = yield response.text();
+    const entries = parseSitemapEntries(xml);
+    sitemapCache = {
+      entries,
+      expiresAt: Date.now() + SITEMAP_CACHE_MS
+    };
+    console.log(`[CinemaCity] Sitemap catalog loaded: ${entries.length} entries`);
+    return entries;
+  });
+}
+function scoreSitemapEntry(entry, expectedTitles, expectedYear) {
+  let bestScore = 0;
+  for (const title of expectedTitles) {
+    const normalized = normalizeTitle(title);
+    const compact = compactTitle(title);
+    if (!normalized || !compact) continue;
+    let score = 0;
+    if (entry.normalizedTitle === normalized || entry.compactTitle === compact) {
+      score = 1e3;
+    } else if (entry.normalizedTitle.startsWith(normalized) || normalized.startsWith(entry.normalizedTitle)) {
+      score = 500;
+    } else if (entry.compactTitle.includes(compact) || compact.includes(entry.compactTitle)) {
+      score = 420;
+    } else {
+      const expectedTokens = getSignificantTokens(title);
+      if (expectedTokens.length > 0 && entry.tokens.length > 0) {
+        let hits = 0;
+        const entryTokenSet = new Set(entry.tokens);
+        for (const token of expectedTokens) {
+          if (entryTokenSet.has(token)) hits++;
+        }
+        const coverage = hits / expectedTokens.length;
+        const extraTokens = Math.max(0, entry.tokens.length - expectedTokens.length);
+        score = coverage * 300 - extraTokens * 20 - Math.abs(entry.tokens.length - expectedTokens.length) * 2;
+      }
+    }
+    if (expectedYear && entry.year) {
+      score += entry.year === expectedYear ? 50 : -Math.abs(entry.year - expectedYear) * 3;
+    }
+    bestScore = Math.max(bestScore, score);
+  }
+  return bestScore;
+}
+function searchBySitemap(id, providerType) {
+  return __async(this, null, function* () {
+    const expectedImdbId = /^tt\d{5,}$/i.test(String(id || "").trim()) ? String(id).trim().toLowerCase() : null;
+    const metadata = yield getTmdbMetadata(id, providerType);
+    const expectedTitles = Array.from(new Set([
+      metadata == null ? void 0 : metadata.title,
+      metadata == null ? void 0 : metadata.name,
+      metadata == null ? void 0 : metadata.original_title,
+      metadata == null ? void 0 : metadata.original_name
+    ].filter(Boolean)));
+    if (expectedTitles.length === 0) {
+      return null;
+    }
+    const expectedYear = extractYearFromMetadata(metadata);
+    const expectedKind = providerType === "movie" ? "movies" : "tv-series";
+    const entries = yield fetchSitemapEntries();
+    let bestEntry = null;
+    let bestScore = -Infinity;
+    const ranked = [];
+    for (const entry of entries) {
+      if (entry.kind !== expectedKind) continue;
+      const score = scoreSitemapEntry(entry, expectedTitles, expectedYear);
+      if (score >= 250) {
+        ranked.push({ entry, score });
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        bestEntry = entry;
+      }
+    }
+    if (!bestEntry || bestScore < 250) {
+      console.log(`[CinemaCity] Sitemap no confident match for ${expectedTitles.join(" / ")} (best=${Math.round(bestScore)})`);
+      return null;
+    }
+    if (expectedImdbId) {
+      ranked.sort((a, b) => b.score - a.score);
+      const candidatesToVerify = ranked.slice(0, 3);
+      for (const candidate of candidatesToVerify) {
+        const candidateImdbId = yield verifyCandidateImdb(candidate.entry.url, expectedImdbId, {
+          skipBypassOnFailure: true
+        });
+        if (candidateImdbId === expectedImdbId) {
+          console.log(`[CinemaCity] Sitemap IMDb verified: ${expectedTitles[0]} -> ${candidate.entry.url}`);
+          return {
+            url: candidate.entry.url,
+            title: expectedTitles[0] || candidate.entry.title
+          };
+        }
+        if (candidateImdbId && candidateImdbId !== expectedImdbId) {
+          console.log(`[CinemaCity] Sitemap IMDb mismatch: ${candidate.entry.url} has ${candidateImdbId}, expected ${expectedImdbId}`);
+          continue;
+        }
+      }
+      const isHighConfidence = bestScore >= 950;
+      if (!isHighConfidence) {
+        console.log(`[CinemaCity] Sitemap match not IMDb verified for ${expectedTitles.join(" / ")} (best=${Math.round(bestScore)})`);
+        return null;
+      }
+    }
+    console.log(`[CinemaCity] Sitemap match: ${expectedTitles[0]} -> ${bestEntry.url} [score=${Math.round(bestScore)}]`);
+    return {
+      url: bestEntry.url,
+      title: expectedTitles[0] || bestEntry.title
+    };
+  });
+}
+function extractCandidateLinksFromListing(html, sectionType) {
+  const pathPrefix = sectionType === "movie" ? "movies" : "tv-series";
+  const regex = new RegExp(`<a[^>]+href=["']((?:https?:\\/\\/cinemacity\\.cc)?\\/${pathPrefix}\\/[^"']+\\.html)["'][^>]*>([\\s\\S]*?)<\\/a>`, "gi");
+  const results = [];
+  let match;
+  while ((match = regex.exec(html)) !== null) {
+    const href = String(match[1] || "").startsWith("/") ? `${BASE_URL}${match[1]}` : String(match[1] || "");
+    const title = decodeHtmlEntities(String(match[2] || "").replace(/<[^>]+>/g, " ")).trim();
+    if (!href || !title) continue;
+    results.push({ url: href, title });
+  }
+  return Array.from(new Map(results.map((item) => [item.url, item])).values());
+}
+function scoreTitleMatch(candidateTitle, expectedTitles) {
+  const normalizedCandidate = normalizeTitle(candidateTitle);
+  if (!normalizedCandidate) return 0;
+  let best = 0;
+  for (const title of expectedTitles) {
+    const normalizedExpected = normalizeTitle(title);
+    if (!normalizedExpected) continue;
+    if (normalizedCandidate === normalizedExpected) return 100;
+    if (normalizedCandidate.includes(normalizedExpected) || normalizedExpected.includes(normalizedCandidate)) {
+      best = Math.max(best, 80);
+    } else {
+      const words = normalizedExpected.length > 5 && normalizedCandidate.length > 5;
+      if (words && (normalizedCandidate.startsWith(normalizedExpected) || normalizedExpected.startsWith(normalizedCandidate))) {
+        best = Math.max(best, 60);
+      }
+    }
+  }
+  return best;
+}
+function extractImdbIdFromHtml(html) {
+  const matches = String(html || "").match(/\btt\d{5,}\b/gi) || [];
+  for (const match of matches) {
+    if (/^tt\d{5,}$/i.test(match)) {
+      return match.toLowerCase();
+    }
+  }
+  return null;
+}
+function verifyCandidateImdb(_0, _1) {
+  return __async(this, arguments, function* (candidateUrl, expectedImdbId, options = {}) {
+    const normalizedExpected = String(expectedImdbId || "").trim().toLowerCase();
+    if (!/^tt\d{5,}$/.test(normalizedExpected)) {
+      return null;
+    }
+    try {
+      const fetcher = options.skipBypassOnFailure ? fetchHtmlNoBypass : fetchHtml;
+      const html = yield fetcher(candidateUrl, {
+        "Referer": `${BASE_URL}/`,
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-User": "?1"
+      });
+      const imdbId = extractImdbIdFromHtml(html);
+      if (imdbId) {
+        console.log(`[CinemaCity] IMDb check ${candidateUrl}: ${imdbId}`);
+      }
+      return imdbId;
+    } catch (e) {
+      const status = getHttpStatusFromError(e);
+      if (status !== 403 && status !== 503 && !isCloudflareBlockedError(e)) {
+        console.error(`[CinemaCity] IMDb check error for ${candidateUrl}:`, e);
+      }
+      return null;
+    }
+  });
+}
+function getTmdbMetadata(id, providerType) {
+  return __async(this, null, function* () {
+    try {
+      let metadataUrl = null;
+      const normalizedId = String(id || "").trim();
+      const normalizedType = providerType === "movie" ? "movie" : "tv";
+      if (/^tt\d+$/i.test(normalizedId)) {
+        metadataUrl = `https://api.themoviedb.org/3/find/${encodeURIComponent(normalizedId)}?api_key=${TMDB_API_KEY}&external_source=imdb_id&language=en-US`;
+      } else if (/^\d+$/.test(normalizedId)) {
+        metadataUrl = `https://api.themoviedb.org/3/${normalizedType}/${normalizedId}?api_key=${TMDB_API_KEY}&language=en-US`;
+      }
+      if (!metadataUrl) return null;
+      const response = yield fetchWithTimeout(metadataUrl, { timeout: FETCH_TIMEOUT });
+      if (!response.ok) return null;
+      const payload = yield response.json();
+      if (/^tt\d+$/i.test(normalizedId)) {
+        const results = normalizedType === "movie" ? payload == null ? void 0 : payload.movie_results : payload == null ? void 0 : payload.tv_results;
+        return Array.isArray(results) && results.length > 0 ? results[0] : null;
+      }
+      return payload;
+    } catch (e) {
+      console.error("[CinemaCity] TMDB metadata error:", e);
+      return null;
+    }
+  });
 }
 function getIdsFromKitsu(kitsuId, season, episode, providerContext = null) {
   return __async(this, null, function* () {
@@ -567,18 +756,21 @@ function getIdsFromKitsu(kitsuId, season, episode, providerContext = null) {
     }
   });
 }
-function searchByImdb(imdbId) {
-  return __async(this, null, function* () {
+function searchByImdb(_0) {
+  return __async(this, arguments, function* (imdbId, options = {}) {
     const cookies = getSessionCookies();
     const trySearch = (query) => __async(null, null, function* () {
       const searchUrl = `${BASE_URL}/index.php?do=search&subaction=search&story=${query}`;
       try {
-        const html = yield smartFetch(searchUrl, BASE_URL, {
-          timeout: FETCH_TIMEOUT,
-          headers: {
-            "Referer": `${BASE_URL}/`
-          }
-        });
+        const html = yield fetchHtml(searchUrl, {
+          "Referer": `${BASE_URL}/`,
+          "Cookie": cookies,
+          "User-Agent": USER_AGENT,
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7"
+        }, __spreadProps(__spreadValues({}, options), {
+          skipBypassOnFailure: true
+        }));
         const resultMatch = html.match(/Found\s+(\d+)\s+responses/i) || html.match(/Trovat[io]\s+(\d+)\s+risultat[io]/i) || html.match(/Query results\s*\d+\s*-\s*(\d+)/i);
         if (!resultMatch || parseInt(resultMatch[1]) === 0) {
           if (!html.includes(query)) return null;
@@ -618,7 +810,10 @@ function searchByImdb(imdbId) {
           return { url: bestLink, title: bestTitle };
         }
       } catch (e) {
-        console.error(`[CinemaCity] Search error for ${query}:`, e);
+        const status = getHttpStatusFromError(e);
+        if (status !== 403 && status !== 404 && !isCloudflareBlockedError(e)) {
+          console.error(`[CinemaCity] Search error for ${query}:`, e);
+        }
       }
       return null;
     });
@@ -629,6 +824,69 @@ function searchByImdb(imdbId) {
       link = yield trySearch(numericId);
     }
     return link;
+  });
+}
+function searchByTitleFallback(_0, _1) {
+  return __async(this, arguments, function* (id, providerType, options = {}) {
+    const metadata = yield getTmdbMetadata(id, providerType);
+    const expectedTitles = Array.from(new Set([
+      metadata == null ? void 0 : metadata.title,
+      metadata == null ? void 0 : metadata.name,
+      metadata == null ? void 0 : metadata.original_title,
+      metadata == null ? void 0 : metadata.original_name
+    ].filter(Boolean)));
+    if (expectedTitles.length === 0) {
+      return null;
+    }
+    const listingBase = providerType === "movie" ? `${BASE_URL}/movies/` : `${BASE_URL}/tv-series/`;
+    let bestResult = null;
+    let bestScore = 0;
+    const normalizedRequestedImdb = /^tt\d{5,}$/i.test(String(id || "").trim()) ? String(id).trim().toLowerCase() : null;
+    for (let page = 1; ; page++) {
+      const pageUrl = page === 1 ? listingBase : `${listingBase}page/${page}/`;
+      try {
+        const html = yield fetchHtml(pageUrl, {
+          "Referer": `${BASE_URL}/`,
+          "Upgrade-Insecure-Requests": "1",
+          "Sec-Fetch-Dest": "document",
+          "Sec-Fetch-Mode": "navigate",
+          "Sec-Fetch-Site": "same-origin",
+          "Sec-Fetch-User": "?1"
+        }, __spreadProps(__spreadValues({}, options), {
+          skipBypassOnFailure: true
+        }));
+        const candidates = extractCandidateLinksFromListing(html, providerType);
+        if (candidates.length === 0) {
+          break;
+        }
+        for (const candidate of candidates) {
+          const score = scoreTitleMatch(candidate.title, expectedTitles);
+          if (score >= 80 && normalizedRequestedImdb) {
+            const candidateImdbId = yield verifyCandidateImdb(candidate.url, normalizedRequestedImdb);
+            if (candidateImdbId && candidateImdbId === normalizedRequestedImdb) {
+              return candidate;
+            }
+            if (candidateImdbId && candidateImdbId !== normalizedRequestedImdb) {
+              continue;
+            }
+          }
+          if (score > bestScore) {
+            bestScore = score;
+            bestResult = candidate;
+          }
+        }
+        if (bestScore >= 100) {
+          return bestResult;
+        }
+      } catch (e) {
+        const status = getHttpStatusFromError(e);
+        if (status !== 404 && status !== 403 && !isCloudflareBlockedError(e)) {
+          console.error(`[CinemaCity] Listing fallback error for page ${pageUrl}:`, e);
+        }
+        break;
+      }
+    }
+    return bestScore >= 80 ? bestResult : null;
   });
 }
 function extractJsonArray(decoded) {
@@ -798,7 +1056,14 @@ function getStreams(id, type, season, episode, providerContext = null) {
       const isStremioAddon = providerContext && providerContext.__requestContext === true;
       const proxyUrl = providerContext && providerContext.proxyUrl || (typeof global !== "undefined" && global.CF_PROXY_URL ? global.CF_PROXY_URL : null);
       const proxyPassword = providerContext && providerContext.proxyPassword || "";
-      const searchResult = yield searchByImdb(imdbId);
+      let searchResult = yield searchBySitemap(imdbId, providerType);
+      const allowLegacySearch = IS_SERVER && typeof process !== "undefined" && String(process.env.CINEMACITY_LEGACY_SEARCH || "").trim().toLowerCase() === "1";
+      if ((!searchResult || !searchResult.url) && allowLegacySearch) {
+        searchResult = yield searchByImdb(imdbId);
+        if (!searchResult || !searchResult.url) {
+          searchResult = yield searchByTitleFallback(imdbId, providerType);
+        }
+      }
       if (!searchResult || !searchResult.url) {
         return [];
       }
@@ -830,14 +1095,15 @@ function getStreams(id, type, season, episode, providerContext = null) {
         };
         return [formatStream(stremioResult, "CinemaCity")];
       }
-      const html = yield smartFetch(movieUrl, BASE_URL, {
-        timeout: FETCH_TIMEOUT,
-        headers: {
-          "Referer": `${BASE_URL}/`
-        }
+      const cookies = getSessionCookies();
+      const html = yield fetchHtml(movieUrl, {
+        "Referer": `${BASE_URL}/`,
+        "Cookie": cookies,
+        "User-Agent": USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7"
       });
       const playerReferer = extractPlayerReferer(html, movieUrl);
-      const cookies = getSessionCookies();
       const atobRegex = /atob\s*\(\s*['"](.*?)['"]\s*\)/gi;
       let match;
       let fileData = null;

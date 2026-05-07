@@ -1,5 +1,4 @@
 const guardahd = require('./guardahd/index');
-const guardaserie = require('./guardaserie/index');
 const guardoserie = require('./guardoserie/index');
 const streamingcommunity = require('./streamingcommunity/index');
 const animeunity = require('./animeunity/index');
@@ -130,7 +129,31 @@ function buildProviderRequestContext(context) {
     };
 }
 
+function parseCompositeSeriesId(rawId, type, season, episode) {
+    const parsed = {
+        id: String(rawId || '').trim(),
+        season: Number.isInteger(season) ? season : (Number.parseInt(String(season || ''), 10) || null),
+        episode: Number.isInteger(episode) ? episode : (Number.parseInt(String(episode || ''), 10) || 1)
+    };
+
+    const normalizedType = String(type || '').toLowerCase();
+    if (normalizedType === 'movie') return parsed;
+
+    const match = parsed.id.match(/^(tt\d+|\d+|tmdb:\d+|kitsu:\d+):(\d+):(\d+)$/i);
+    if (!match) return parsed;
+
+    parsed.id = match[1];
+    parsed.season = Number.parseInt(match[2], 10);
+    parsed.episode = Number.parseInt(match[3], 10);
+    return parsed;
+}
+
 async function getStreams(id, type, season, episode) {
+    const parsedRequest = parseCompositeSeriesId(id, type, season, episode);
+    id = parsedRequest.id;
+    season = parsedRequest.season;
+    episode = parsedRequest.episode;
+
     const streams = [];
     const normalizedType = String(type || '').toLowerCase();
     const parsedNormalizedSeason = Number.parseInt(season, 10);
@@ -164,15 +187,15 @@ async function getStreams(id, type, season, episode) {
             selectedProviders.push('streamingcommunity', 'guardahd', 'guardoserie', 'cinemacity');
         }
     } else if (normalizedType === 'anime') {
-        selectedProviders.push('animeunity', 'animeworld', 'animesaturn', 'guardaserie', 'guardoserie');
+        selectedProviders.push('animeunity', 'animeworld', 'animesaturn', 'guardoserie');
     } else if (normalizedType === 'tv' || normalizedType === 'series') {
         if (likelyAnime) {
-            selectedProviders.push('animeunity', 'animeworld', 'animesaturn', 'guardaserie', 'guardoserie');
+            selectedProviders.push('animeunity', 'animeworld', 'animesaturn', 'guardoserie');
         } else {
             if (isImdbRequest) {
-                selectedProviders.push('streamingcommunity', 'guardaserie', 'guardoserie', 'cinemacity');
+                selectedProviders.push('streamingcommunity', 'guardoserie', 'cinemacity');
             } else {
-                selectedProviders.push('streamingcommunity', 'guardaserie', 'guardoserie', 'animeunity', 'animeworld', 'animesaturn');
+                selectedProviders.push('streamingcommunity', 'guardoserie', 'cinemacity');
             }
         }
     } else {
@@ -193,14 +216,6 @@ async function getStreams(id, type, season, episode) {
                 guardahd.getStreams(id, normalizedType, effectiveSeason, normalizedEpisode)
                     .then(s => ({ provider: 'GuardaHD', streams: s, status: 'fulfilled' }))
                     .catch(e => ({ provider: 'GuardaHD', error: e, status: 'rejected' }))
-            );
-            continue;
-        }
-        if (providerName === 'guardaserie') {
-            promises.push(
-                guardaserie.getStreams(id, normalizedType, effectiveSeason, normalizedEpisode, sharedContext)
-                    .then(s => ({ provider: 'Guardaserie', streams: s, status: 'fulfilled' }))
-                    .catch(e => ({ provider: 'Guardaserie', error: e, status: 'rejected' }))
             );
             continue;
         }
@@ -242,6 +257,7 @@ async function getStreams(id, type, season, episode) {
                     .then(s => ({ provider: 'CinemaCity', streams: s, status: 'fulfilled' }))
                     .catch(e => ({ provider: 'CinemaCity', error: e, status: 'rejected' }))
             );
+            continue;
         }
     }
 

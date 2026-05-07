@@ -1,5 +1,11 @@
+const { spawn } = require('child_process');
+const { sanitizeLogArgs } = require('./src/utils/log_sanitizer');
 
-// Polyfill fetch and related Web APIs for Node.js environments (Must be at the top)
+try {
+    require('dns').setDefaultResultOrder('ipv4first');
+} catch {}
+
+// Polyfill fetch and related Web APIs
 if (typeof global.Blob === 'undefined') {
     global.Blob = require('node:buffer').Blob;
 }
@@ -27,35 +33,36 @@ if (!global.fetch) {
 
 const https = require('https');
 const http = require('http');
-const flareManager = require('./flare_manager');
-const { getClearance } = require('./cf_bypass');
 
-const IS_PRODUCTION = false;
-const VERBOSE_LOGS = true;
-const QUIET_PROVIDER_LOGS = true;
+const LOG_LEVEL = String(process.env.LOG_LEVEL || 'warn').trim().toLowerCase();
+const ENABLE_INFO_LOGS = ['debug', 'verbose', 'info'].includes(LOG_LEVEL);
+const VERBOSE_LOGS = ['debug', 'verbose'].includes(LOG_LEVEL);
 
 const PROVIDER_LOG_PREFIXES = [
     '[GuardaHD]',
     '[Guardoserie]',
-    '[Guardaserie]',
+    '[CinemaCity]',
     '[AnimeUnity]',
     '[AnimeWorld]',
     '[AnimeSaturn]',
     '[StreamingCommunity]',
-    '[CinemaCity]',
     '[QualityHelper]'
 ];
 
 const originalConsoleLog = console.log.bind(console);
-if (IS_PRODUCTION && !VERBOSE_LOGS && QUIET_PROVIDER_LOGS) {
-    console.log = (...args) => {
-        const first = typeof args[0] === 'string' ? args[0] : '';
-        if (first && PROVIDER_LOG_PREFIXES.some((prefix) => first.startsWith(prefix))) {
-            return;
-        }
-        originalConsoleLog(...args);
-    };
-}
+const originalConsoleWarn = console.warn.bind(console);
+const originalConsoleError = console.error.bind(console);
+
+console.log = (...args) => {
+    if (!ENABLE_INFO_LOGS) return;
+    originalConsoleLog(...sanitizeLogArgs(args));
+};
+
+console.warn = (...args) => originalConsoleWarn(...sanitizeLogArgs(args));
+console.error = (...args) => originalConsoleError(...sanitizeLogArgs(args));
+
+const flareManager = require('./flare_manager');
+const { getClearance, getStats: getFlareStats } = require('./cf_bypass');
 
 function logInfo(...args) {
     console.log(...args);
@@ -85,14 +92,19 @@ const { addonBuilder, serveHTTP, getRouter } = require('stremio-addon-sdk');
 const express = require('express');
 const app = express();
 const path = require('path');
-const DISABLE_MIXDROP_ENV =
-    typeof process !== 'undefined' &&
-        process &&
-        process.env &&
-        typeof process.env.DISABLE_MIXDROP === 'string'
-        ? process.env.DISABLE_MIXDROP.trim().toLowerCase()
-        : '';
-const DISABLE_MIXDROP_IN_ADDON = !['0', 'false', 'no', 'off'].includes(DISABLE_MIXDROP_ENV);
+const { renderLandingPage } = require('./src/views/landing_page');
+function readPositiveIntEnv(name, fallback) {
+    const value = Number.parseInt(String(process.env[name] || ''), 10);
+    return Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
+app.get('/health/flaresolverr', (req, res) => {
+    res.json({
+        ok: true,
+        flaresolverr: getFlareStats()
+    });
+});
+
 const DISABLE_UQLOAD_ENV =
     typeof process !== 'undefined' &&
         process &&
@@ -130,6 +142,10 @@ const metrics = {
 
 // Monitoring Middleware
 app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    res.setHeader('Access-Control-Allow-Methods', '*');
+
     const start = Date.now();
     metrics.requests++;
 
@@ -150,7 +166,7 @@ app.use((req, res, next) => {
 });
 
 // Global timeout configuration
-const FETCH_TIMEOUT = 10000;
+const FETCH_TIMEOUT = 15000;
 const STREAM_RESPONSE_TIMEOUT = 45000;
 const DEFAULT_PROVIDER_TIMEOUT = 40000;
 const PROVIDER_TIMEOUT = 40000;
@@ -164,7 +180,7 @@ const ENABLE_TMDB_ANIME_DETECTION = true;
 const TMDB_ANIME_DETECTION_TIMEOUT = 1200;
 const TMDB_ANIME_CACHE_TTL = 21600000;
 const ADDON_CACHE_ENABLED = true;
-const STREAM_CACHE_TTL = 10000;
+const STREAM_CACHE_TTL = 60000;
 const STREAM_CACHE_MAX_SIZE = 50000;
 const STREAM_CACHE_MAX_BYTES = 100 * 1024 * 1024;
 const PROVIDER_BENCHMARK_LOGS =
@@ -386,21 +402,74 @@ function normalizeEasyProxyUrl(value) {
     return /^https?:\/\//i.test(trimmed) ? trimmed : '';
 }
 
-function resolveEasyProxyUrlFromConfig(config = null) {
-    return normalizeEasyProxyUrl(config?.easyProxyUrl);
+function normalizeEasyProxyEntry(entry, fallbackPassword = '') {
+    const url = normalizeEasyProxyUrl(entry?.url || entry);
+    if (!url) return null;
+    return {
+        url,
+        password: String(entry?.password ?? fallbackPassword ?? '').trim()
+    };
 }
 
-function resolveEasyProxyPasswordFromConfig(config = null) {
-    return String(config?.easyProxyPassword || '').trim();
+function parseEasyProxyEntries(value) {
+    if (Array.isArray(value)) return value;
+    const raw = String(value || '').trim();
+    if (!raw) return [];
+    try {
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : [];
+    } catch {
+        return [];
+    }
+}
+
+function resolveEasyProxyEntriesFromConfig(config = null) {
+    const configuredEntries = parseEasyProxyEntries(config?.easyProxies)
+        .map((entry) => normalizeEasyProxyEntry(entry))
+        .filter(Boolean);
+
+    const entries = configuredEntries.length > 0
+        ? configuredEntries
+        : String(config?.easyProxyUrls || config?.easyProxyUrl || '')
+            .split(/[\s,]+/)
+            .map((url) => normalizeEasyProxyEntry(url, config?.easyProxyPassword))
+            .filter(Boolean);
+
+    const seen = new Set();
+    return entries.filter((entry) => {
+        const token = `${entry.url}\n${entry.password}`;
+        if (seen.has(token)) return false;
+        seen.add(token);
+        return true;
+    });
+}
+
+function resolveEasyProxyModeFromConfig(config = null) {
+    const normalized = String(config?.easyProxyMode || '').trim().toLowerCase();
+    return ['load-balance', 'loadbalance', 'balanced', 'round-robin', 'roundrobin'].includes(normalized)
+        ? 'load-balance'
+        : 'failover';
+}
+
+function resolveDisabledProvidersFromConfig(config = null) {
+    const raw = String(config?.disabledProviders || '').trim();
+    if (!raw) return new Set();
+    return new Set(raw.split(',').map((name) => name.trim().toLowerCase()).filter(Boolean));
 }
 
 function getMappingLanguageToken(mappingLanguage) {
     return String(mappingLanguage || '').trim().toLowerCase() === 'it' ? 'it' : 'default';
 }
 
-function getEasyProxyToken(easyProxyUrl, easyProxyPassword = '') {
-    if (!easyProxyUrl) return 'default';
-    return `${easyProxyUrl}:pwd:${easyProxyPassword || ''}`;
+function getEasyProxyEntriesToken(easyProxyEntries, easyProxyMode = 'failover') {
+    const entries = Array.isArray(easyProxyEntries) ? easyProxyEntries.filter((entry) => entry?.url) : [];
+    if (entries.length === 0) return 'default';
+    return `${easyProxyMode}:${entries.map((entry) => `${entry.url}:pwd:${entry.password || ''}`).join('|')}`;
+}
+
+function getDisabledProvidersToken(disabledProviders) {
+    const values = Array.from(disabledProviders || []).sort();
+    return values.length > 0 ? values.join(',') : 'none';
 }
 
 function buildEasyProxyManifestUrl(easyProxyUrl, easyProxyPassword, streamUrl) {
@@ -412,21 +481,31 @@ function buildEasyProxyManifestUrl(easyProxyUrl, easyProxyPassword, streamUrl) {
     return `${proxyBaseUrl}/proxy/hls/manifest.m3u8?d=${encodeURIComponent(normalizedStreamUrl)}&redirect_stream=true${passwordQuery}`;
 }
 
-function buildEasyProxyExtractorUrl(easyProxyUrl, easyProxyPassword, host, streamUrl) {
+function buildEasyProxyExtractorUrl(easyProxyUrl, easyProxyPassword, host, streamUrl, extension = 'm3u8') {
     const proxyBaseUrl = normalizeEasyProxyUrl(easyProxyUrl);
     const proxyPassword = String(easyProxyPassword || '').trim();
     const normalizedHost = String(host || '').trim();
     const normalizedStreamUrl = String(streamUrl || '').trim();
     if (!proxyBaseUrl || !normalizedHost || !normalizedStreamUrl) return normalizedStreamUrl;
     const passwordQuery = proxyPassword ? `&api_password=${encodeURIComponent(proxyPassword)}` : '';
-    return `${proxyBaseUrl}/extractor/video.m3u8?host=${encodeURIComponent(normalizedHost)}&url=${encodeURIComponent(normalizedStreamUrl)}&redirect_stream=true${passwordQuery}`;
+    return `${proxyBaseUrl}/extractor/video.${extension}?host=${encodeURIComponent(normalizedHost)}&d=${encodeURIComponent(normalizedStreamUrl)}&redirect_stream=true${passwordQuery}`;
 }
 
 function isMixdropStreamUrl(streamUrl) {
-    const normalizedStreamUrl = String(streamUrl || '').trim().toLowerCase();
-    return normalizedStreamUrl.includes('mixdrop')
-        || normalizedStreamUrl.includes('m1xdrop')
-        || normalizedStreamUrl.includes('mxcontent');
+    const lower = String(streamUrl || '').toLowerCase();
+    return lower.includes('mixdrop') || lower.includes('m1xdrop') || lower.includes('mxcontent');
+}
+
+function isMixdropStream(stream) {
+    const text = [
+        stream?.url,
+        stream?.easyProxySourceUrl,
+        stream?.name,
+        stream?.title,
+        stream?.providerName
+    ].filter(Boolean).join(' ').toLowerCase();
+
+    return text.includes('mixdrop') || text.includes('m1xdrop') || text.includes('mxcontent');
 }
 
 function isStreamHgStream(stream) {
@@ -452,7 +531,73 @@ function buildEasyProxyStreamUrl(easyProxyUrl, easyProxyPassword, streamUrl) {
     const normalizedStreamUrl = String(streamUrl || '').trim();
     if (!proxyBaseUrl || !normalizedStreamUrl) return normalizedStreamUrl;
     const passwordQuery = proxyPassword ? `&api_password=${encodeURIComponent(proxyPassword)}` : '';
-    return `${proxyBaseUrl}/proxy/stream?d=${normalizedStreamUrl}&redirect_stream=true${passwordQuery}`;
+    return `${proxyBaseUrl}/proxy/stream?d=${encodeURIComponent(normalizedStreamUrl)}&redirect_stream=true${passwordQuery}`;
+}
+
+let easyProxyRoundRobinCursor = 0;
+const EASY_PROXY_HEALTH_TIMEOUT_MS = 1000;
+
+function getEasyProxyCandidateEntries(easyProxyEntries, easyProxyMode = 'failover') {
+    const entries = Array.isArray(easyProxyEntries) ? easyProxyEntries.filter((entry) => entry?.url) : [];
+    if (entries.length <= 1 || easyProxyMode !== 'load-balance') return entries;
+    const start = easyProxyRoundRobinCursor % entries.length;
+    easyProxyRoundRobinCursor = (easyProxyRoundRobinCursor + 1) % entries.length;
+    return entries.slice(start).concat(entries.slice(0, start));
+}
+
+function buildEasyProxyHealthUrl(easyProxyUrl) {
+    const proxyBaseUrl = normalizeEasyProxyUrl(easyProxyUrl);
+    return proxyBaseUrl ? `${proxyBaseUrl}/proxy/ip` : '';
+}
+
+async function shouldFailoverEasyProxy(proxyEntry) {
+    const proxyUrl = proxyEntry?.url;
+    if (!proxyUrl) return false;
+
+    // Se l'URL non è HTTPS, lo consideriamo potenzialmente locale (localhost, IP privati, ecc.)
+    // In questi casi non vogliamo scartare il proxy anche se sembra lento o offline.
+    if (!proxyUrl.toLowerCase().startsWith('https:')) {
+        return false;
+    }
+
+    const healthUrl = buildEasyProxyHealthUrl(proxyUrl);
+    if (!healthUrl || typeof fetch !== 'function') return false;
+
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timeoutId = controller ? setTimeout(() => controller.abort(), EASY_PROXY_HEALTH_TIMEOUT_MS) : null;
+    try {
+        const response = await fetch(healthUrl, {
+            method: 'GET',
+            redirect: 'manual',
+            signal: controller?.signal
+        });
+        const status = Number(response?.status || 0);
+        return status === 404 || status >= 500;
+    } catch (error) {
+        logVerbose(`[EasyProxy] Health check failed for ${healthUrl}: ${error.message}`);
+        return true;
+    } finally {
+        if (timeoutId) clearTimeout(timeoutId);
+    }
+}
+
+async function buildEasyProxyUrlWithFailover(easyProxyEntries, easyProxyMode, buildUrl) {
+    const candidates = getEasyProxyCandidateEntries(easyProxyEntries, easyProxyMode);
+    if (candidates.length === 0) return '';
+
+    let fallbackUrl = '';
+    for (const proxyEntry of candidates) {
+        const proxiedUrl = buildUrl(proxyEntry.url, proxyEntry.password || '');
+        if (!proxiedUrl) continue;
+        if (!fallbackUrl) fallbackUrl = proxiedUrl;
+        const shouldFailover = await shouldFailoverEasyProxy(proxyEntry);
+        if (!shouldFailover) {
+            return proxiedUrl;
+        }
+        logVerbose(`[EasyProxy] ${buildEasyProxyHealthUrl(proxyEntry.url)} health check failed or timed out, trying next proxy`);
+    }
+
+    return fallbackUrl;
 }
 
 function hasJapaneseCharacters(value) {
@@ -1182,7 +1327,6 @@ async function resolveCanonicalStreamCacheKey(type, providerId, season, episode,
 // Import providers
 const providers = {
     guardahd: require('./src/guardahd/index.js'),
-    guardaserie: require('./src/guardaserie/index.js'),
     guardoserie: require('./src/guardoserie/index.js'),
     animeunity: require('./src/animeunity/index.js'),
     animeworld: require('./src/animeworld/index.js'),
@@ -1247,7 +1391,7 @@ function getProviderExecutionOrder(type, providerId, requestContext, animeRoutin
     if (normalizedType === 'movie') {
         if (isKitsuRequest) {
             // For Kitsu movies, use anime providers first and keep non-anime fallbacks.
-            plan = ['animeunity', 'animeworld', 'animesaturn', 'guardoserie', 'streamingcommunity', 'guardahd', 'cinemacity'];
+            plan = ['animeunity', 'animeworld', 'animesaturn', 'guardoserie', 'streamingcommunity', 'guardahd'];
         } else if (isImdbRequest) {
             plan = likelyAnime
                 ? ['animeunity', 'animeworld', 'animesaturn', 'guardoserie', 'streamingcommunity', 'guardahd']
@@ -1258,16 +1402,16 @@ function getProviderExecutionOrder(type, providerId, requestContext, animeRoutin
             plan = ['streamingcommunity', 'guardahd', 'guardoserie', 'cinemacity'];
         }
     } else if (normalizedType === 'anime') {
-        plan = ['animeunity', 'animeworld', 'animesaturn', 'guardaserie', 'guardoserie'];
+        plan = ['animeunity', 'animeworld', 'animesaturn', 'guardoserie'];
     } else {
         if (isImdbRequest) {
             plan = likelyAnime
-                ? ['animeunity', 'animeworld', 'animesaturn', 'guardaserie', 'guardoserie']
-                : ['streamingcommunity', 'guardaserie', 'guardoserie', 'cinemacity'];
+                ? ['animeunity', 'animeworld', 'animesaturn', 'guardoserie']
+                : ['streamingcommunity', 'guardoserie', 'cinemacity'];
         } else if (likelyAnime || ENABLE_ANIME_FALLBACK_ON_SERIES) {
-            plan = ['animeunity', 'animeworld', 'animesaturn', 'guardaserie', 'guardoserie'];
+            plan = ['animeunity', 'animeworld', 'animesaturn', 'guardoserie'];
         } else {
-            plan = ['streamingcommunity', 'guardaserie', 'guardoserie', 'cinemacity'];
+            plan = ['streamingcommunity', 'guardoserie', 'cinemacity'];
         }
     }
 
@@ -1297,24 +1441,35 @@ const builder = new addonBuilder({
             title: 'EasyCatalogs mode (adds lang=it to mapping requests)'
         },
         {
-            key: 'easyProxyUrl',
+            key: 'easyProxies',
             type: 'text',
-            title: 'EasyProxy base URL for VixSrc streams'
+            title: 'EasyProxy endpoints JSON'
         },
         {
-            key: 'easyProxyPassword',
+            key: 'easyProxyMode',
+            type: 'select',
+            title: 'EasyProxy mode (Failover: usa primo sano | Load-balance: alterna)',
+            options: ['failover', 'load-balance']
+        },
+        {
+            key: 'disabledProviders',
             type: 'text',
-            title: 'EasyProxy API password'
+            title: 'Disabled providers (comma-separated)'
         }
     ]
 });
 
 builder.defineStreamHandler(async ({ type, id, config = {} }) => {
     const mappingLanguage = resolveMappingLanguageFromConfig(config);
-    const easyProxyUrl = resolveEasyProxyUrlFromConfig(config);
-    const easyProxyPassword = resolveEasyProxyPasswordFromConfig(config);
-    global.DISABLE_MIXDROP = DISABLE_MIXDROP_IN_ADDON && !easyProxyUrl;
-    const requestKey = `${type}:${id}:lang:${getMappingLanguageToken(mappingLanguage)}:proxy:${getEasyProxyToken(easyProxyUrl, easyProxyPassword)}`;
+    const easyProxyEntries = resolveEasyProxyEntriesFromConfig(config);
+    const easyProxyMode = resolveEasyProxyModeFromConfig(config);
+    
+    // Pre-select a healthy proxy based on the configured failover/skip logic
+    const healthyProxyUrl = await buildEasyProxyUrlWithFailover(easyProxyEntries, easyProxyMode, (url) => url);
+    const easyProxyUrl = healthyProxyUrl || (easyProxyEntries[0]?.url || '');
+    const easyProxyPassword = easyProxyEntries.find(e => e.url === easyProxyUrl)?.password || easyProxyEntries[0]?.password || '';
+    const disabledProviders = resolveDisabledProvidersFromConfig(config);
+    const requestKey = `${type}:${id}:lang:${getMappingLanguageToken(mappingLanguage)}:proxy:${getEasyProxyEntriesToken(easyProxyEntries, easyProxyMode)}:disabled:${getDisabledProvidersToken(disabledProviders)}`;
     const parsedRequest = parseStremioRequestId(type, id);
     const providerId = parsedRequest.providerId;
     const season = parsedRequest.season;
@@ -1350,7 +1505,7 @@ builder.defineStreamHandler(async ({ type, id, config = {} }) => {
         : season;
     const baseCanonicalCacheKey = await resolveCanonicalStreamCacheKey(type, providerId, season, episode, requestContext, mappingLanguage);
     const canonicalCacheKey = baseCanonicalCacheKey
-        ? `${baseCanonicalCacheKey}:proxy:${getEasyProxyToken(easyProxyUrl, easyProxyPassword)}`
+        ? `${baseCanonicalCacheKey}:proxy:${getEasyProxyEntriesToken(easyProxyEntries, easyProxyMode)}:disabled:${getDisabledProvidersToken(disabledProviders)}`
         : null;
 
     if (cacheEnabledForRequest && canonicalCacheKey && canonicalCacheKey !== requestKey) {
@@ -1413,7 +1568,8 @@ builder.defineStreamHandler(async ({ type, id, config = {} }) => {
         if (animeRoutingFlag && type !== 'anime') {
             logVerbose(`[Stremio] Anime routing enabled for ${type}:${providerId}`);
         }
-        const selectedProviders = getProviderExecutionOrder(type, providerId, requestContext, animeRoutingFlag);
+        const selectedProviders = getProviderExecutionOrder(type, providerId, requestContext, animeRoutingFlag)
+            .filter((name) => !disabledProviders.has(String(name).toLowerCase()));
         if (selectedProviders.length === 0) {
             console.warn('[Stremio] No provider selected for request.');
             return { streams: [] };
@@ -1451,6 +1607,9 @@ builder.defineStreamHandler(async ({ type, id, config = {} }) => {
                     try {
                         const providerContext = buildProviderRequestContext(requestContext);
                         providerContext.proxyUrl = easyProxyUrl;
+                        providerContext.proxyUrls = easyProxyEntries.map((entry) => entry.url);
+                        providerContext.proxyEntries = easyProxyEntries;
+                        providerContext.proxyMode = easyProxyMode;
                         providerContext.proxyPassword = easyProxyPassword;
                         const streams = await provider.getStreams(providerId, providerType, effectiveSeason, episode, providerContext);
                         logVerbose(`[${name}] Found ${streams.length} streams`);
@@ -1495,44 +1654,66 @@ builder.defineStreamHandler(async ({ type, id, config = {} }) => {
                             !sTitle.includes('uqload')
                         );
                     })
-                    .map((s) => {
+                    .map(async (s) => {
                         let finalStreamUrl = s.url;
                         let proxiedByEasyProxy = false;
                         if (name === 'streamingcommunity') {
-                            finalStreamUrl = buildEasyProxyManifestUrl(
-                                easyProxyUrl,
-                                easyProxyPassword,
-                                s.easyProxySourceUrl || s.url
+                            finalStreamUrl = await buildEasyProxyUrlWithFailover(
+                                easyProxyEntries,
+                                easyProxyMode,
+                                (proxyUrl, proxyPassword) => buildEasyProxyExtractorUrl(
+                                    proxyUrl,
+                                    proxyPassword,
+                                    'vixsrc',
+                                    s.easyProxySourceUrl || s.url,
+                                    'm3u8'
+                                )
                             );
                             proxiedByEasyProxy = finalStreamUrl !== s.url;
                         } else if (name === 'animeunity') {
-                            finalStreamUrl = buildEasyProxyManifestUrl(
-                                easyProxyUrl,
-                                easyProxyPassword,
-                                s.easyProxySourceUrl || s.url
+                            finalStreamUrl = await buildEasyProxyUrlWithFailover(
+                                easyProxyEntries,
+                                easyProxyMode,
+                                (proxyUrl, proxyPassword) => buildEasyProxyExtractorUrl(
+                                    proxyUrl,
+                                    proxyPassword,
+                                    'vixcloud',
+                                    s.easyProxySourceUrl || s.url
+                                )
                             );
                             proxiedByEasyProxy = finalStreamUrl !== s.url;
                         } else if (isStreamHgStream(s)) {
-                            finalStreamUrl = buildEasyProxyExtractorUrl(
-                                easyProxyUrl,
-                                easyProxyPassword,
-                                'streamhg',
-                                s.easyProxySourceUrl || s.url
+                            finalStreamUrl = await buildEasyProxyUrlWithFailover(
+                                easyProxyEntries,
+                                easyProxyMode,
+                                (proxyUrl, proxyPassword) => buildEasyProxyExtractorUrl(
+                                    proxyUrl,
+                                    proxyPassword,
+                                    'streamhg',
+                                    s.easyProxySourceUrl || s.url
+                                )
                             );
                             proxiedByEasyProxy = finalStreamUrl !== s.url;
-                        } else if (isMixdropStreamUrl(s.url)) {
-                            finalStreamUrl = buildEasyProxyStreamUrl(
-                                easyProxyUrl,
-                                easyProxyPassword,
-                                s.easyProxySourceUrl || s.url
+                        } else if (isMixdropStream(s)) {
+                            const mixdropExtension = name === 'guardahd' ? 'mp4' : 'm3u8';
+                            finalStreamUrl = await buildEasyProxyUrlWithFailover(
+                                easyProxyEntries,
+                                easyProxyMode,
+                                (proxyUrl, proxyPassword) => buildEasyProxyExtractorUrl(
+                                    proxyUrl,
+                                    proxyPassword,
+                                    'mixdrop',
+                                    s.easyProxySourceUrl || s.url,
+                                    mixdropExtension
+                                )
                             );
                             proxiedByEasyProxy = finalStreamUrl !== s.url;
                         }
 
                         // For Stremio, we reconstruct the legacy multiline format using metadata
-                        const nameUI = (s.qualityTag && s.qualityTag !== 'Unknown') ? s.qualityTag : s.providerName;
-
-                        let titleUI = `📁 ${s.originalTitle}\n${s.providerName}`;
+                        const nameUI = (s.qualityTag && s.qualityTag !== 'Unknown') ? s.qualityTag : (s.providerName || s.name || 'EasyStreams');
+                        const displayTitle = s.originalTitle || s.title || 'Stream';
+                        let titleUI = `📁 ${displayTitle}\n${s.providerName || s.name || 'EasyStreams'}`;
                         if (s.description) titleUI += ` | ${s.description}`;
                         if (s.language) {
                             titleUI += `\n🗣️ ${s.language}  🔍EasyStreams`;
@@ -1560,13 +1741,14 @@ builder.defineStreamHandler(async ({ type, id, config = {} }) => {
                             language: s.language
                         };
                     });
-                processedStreamsCount = processedStreams.length;
+                const processedStreamsResolved = await Promise.all(processedStreams);
+                processedStreamsCount = processedStreamsResolved.length;
 
-                if (processedStreams.length > 0) {
-                    collectedStreams.push(...processedStreams);
+                if (processedStreamsResolved.length > 0) {
+                    collectedStreams.push(...processedStreamsResolved);
                 }
 
-                return processedStreams;
+                return processedStreamsResolved;
             } catch (e) {
                 executionError = e;
                 console.error(`[${name}] Error:`, e.message);
@@ -1675,6 +1857,7 @@ builder.defineStreamHandler(async ({ type, id, config = {} }) => {
             };
 
             const getScore = (str) => {
+                if (!str) return 0;
                 for (const [k, v] of Object.entries(qualityOrder)) {
                     if (str.includes(k)) return v;
                 }
@@ -1726,412 +1909,61 @@ builder.defineStreamHandler(async ({ type, id, config = {} }) => {
 const addonInterface = builder.getInterface();
 const addonRouter = getRouter(addonInterface);
 
+function parseConfigPathParam(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return {};
+    try {
+        const decoded = decodeURIComponent(raw);
+        const parsed = JSON.parse(decoded);
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+        return {};
+    }
+}
+
+function sendConfigurePage(res, initialConfig = {}) {
+    res.send(renderLandingPage({
+        manifest: addonInterface.manifest,
+        providerNames: Object.keys(providers),
+        initialConfig
+    }));
+}
+
+function sendManifest(res) {
+    const manifest = JSON.parse(JSON.stringify(addonInterface.manifest));
+    manifest.behaviorHints = {
+        ...(manifest.behaviorHints || {}),
+        configurable: true
+    };
+    res.json(manifest);
+}
+
 // Custom Landing Page
 app.get('/', (req, res) => {
-    const manifest = addonInterface.manifest;
-    const providerNames = Object.keys(providers);
-    const providersHtml = providerNames.map(p => `<div class="provider-tag">${p}</div>`).join('');
+    sendConfigurePage(res);
+});
 
-    // Standard Stremio Landing Page Style
-    const landingHtml = `
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>${manifest.name} - Stremio Addon</title>
-        <style>
-            :root {
-                --purple: #8A5AAB;
-                --purple-hover: #7b4b9b;
-                --bg: #151515;
-                --text: #fff;
-                --text-secondary: #aaa;
-            }
-            body {
-                background-color: var(--bg);
-                color: var(--text);
-                font-family: 'Open Sans', Arial, sans-serif;
-                margin: 0;
-                padding: 0;
-                display: flex;
-                flex-direction: column;
-                min-height: 100vh;
-                background-image: radial-gradient(circle at center, #252525 0%, #151515 100%);
-            }
-            .header {
-                padding: 20px 40px;
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-            }
-            .logo-text {
-                font-weight: 700;
-                font-size: 20px;
-                color: #fff;
-                text-decoration: none;
-                display: flex;
-                align-items: center;
-                gap: 10px;
-            }
-            .logo-icon {
-                width: 32px;
-                height: 32px;
-                background: var(--purple);
-                border-radius: 6px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                font-size: 18px;
-            }
-            .main-content {
-                flex: 1;
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-                justify-content: center;
-                padding: 40px 20px;
-                text-align: center;
-                position: relative;
-                z-index: 1;
-            }
-            .addon-card {
-                background: #1e1e1e;
-                border-radius: 12px;
-                padding: 50px 40px;
-                max-width: 500px;
-                width: 100%;
-                box-shadow: 0 10px 40px rgba(0,0,0,0.4);
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-            }
-            .addon-logo {
-                width: 120px;
-                height: 120px;
-                background: #252525;
-                border-radius: 16px;
-                margin-bottom: 30px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                font-size: 50px;
-                box-shadow: 0 4px 15px rgba(0,0,0,0.3);
-            }
-            h1 {
-                margin: 0 0 10px 0;
-                font-size: 32px;
-                font-weight: 700;
-            }
-            .version {
-                color: var(--text-secondary);
-                font-size: 14px;
-                margin-bottom: 20px;
-                background: #2a2a2a;
-                padding: 4px 10px;
-                border-radius: 4px;
-            }
-            .description {
-                color: var(--text-secondary);
-                font-size: 16px;
-                line-height: 1.6;
-                margin-bottom: 20px;
-                max-width: 400px;
-            }
-            .providers-title {
-                font-size: 12px;
-                text-transform: uppercase;
-                letter-spacing: 1px;
-                color: #666;
-                margin-bottom: 10px;
-                margin-top: 10px;
-            }
-            .providers-list {
-                margin-bottom: 30px;
-                display: flex;
-                flex-wrap: wrap;
-                justify-content: center;
-                gap: 8px;
-            }
-            .provider-tag {
-                background: #2a2a2a;
-                padding: 5px 10px;
-                border-radius: 6px;
-                font-size: 11px;
-                color: #ccc;
-                border: 1px solid #333;
-                text-transform: uppercase;
-                font-weight: 600;
-                letter-spacing: 0.5px;
-            }
-            .config-panel {
-                width: 100%;
-                margin-bottom: 24px;
-                padding: 16px 18px;
-                border-radius: 10px;
-                border: 1px solid #333;
-                background: #232323;
-                text-align: left;
-                box-sizing: border-box;
-            }
-            .config-panel-title {
-                font-size: 12px;
-                text-transform: uppercase;
-                letter-spacing: 1px;
-                color: #8f8f8f;
-                margin-bottom: 12px;
-            }
-            .config-toggle {
-                display: flex;
-                align-items: flex-start;
-                gap: 12px;
-                cursor: pointer;
-                color: #f2f2f2;
-            }
-            .config-panel .config-toggle + .config-toggle {
-                margin-top: 14px;
-            }
-            .config-toggle input {
-                margin-top: 2px;
-            }
-            .config-toggle strong {
-                display: block;
-                font-size: 14px;
-                margin-bottom: 4px;
-            }
-            .config-toggle span {
-                display: block;
-                color: var(--text-secondary);
-                font-size: 13px;
-                line-height: 1.4;
-            }
-            .config-input {
-                width: 100%;
-                margin-top: 10px;
-                padding: 10px 12px;
-                border-radius: 8px;
-                border: 1px solid #3a3a3a;
-                background: #171717;
-                color: #f2f2f2;
-                font-size: 14px;
-                box-sizing: border-box;
-            }
-            .config-input::placeholder {
-                color: #7a7a7a;
-            }
-            .install-btn {
-                background-color: var(--purple);
-                color: white;
-                border: none;
-                padding: 16px 40px;
-                font-size: 18px;
-                font-weight: 700;
-                border-radius: 8px;
-                cursor: pointer;
-                text-decoration: none;
-                transition: transform 0.2s, background-color 0.2s;
-                display: inline-block;
-                box-shadow: 0 4px 15px rgba(138, 90, 171, 0.4);
-            }
-            .install-btn:hover {
-                background-color: var(--purple-hover);
-                transform: translateY(-2px);
-            }
-            .install-btn:active {
-                transform: translateY(0);
-            }
-            .copy-btn {
-                background-color: transparent;
-                color: var(--text-secondary);
-                border: 1px solid #333;
-                padding: 10px 20px;
-                font-size: 14px;
-                font-weight: 600;
-                border-radius: 6px;
-                cursor: pointer;
-                margin-top: 15px;
-                transition: all 0.2s;
-            }
-            .copy-btn:hover {
-                border-color: #555;
-                color: #fff;
-            }
-            .footer {
-                padding: 20px;
-                text-align: center;
-                color: #555;
-                font-size: 13px;
-            }
-            .footer a {
-                color: #777;
-                text-decoration: none;
-            }
-            .footer a:hover {
-                color: var(--purple);
-            }
-            
-            /* Background Pattern */
-            .bg-pattern {
-                position: absolute;
-                top: 0;
-                left: 0;
-                width: 100%;
-                height: 100%;
-                background-image: url('data:image/svg+xml,%3Csvg width="60" height="60" viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg"%3E%3Cg fill="none" fill-rule="evenodd"%3E%3Cg fill="%23222" fill-opacity="0.4"%3E%3Cpath d="M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z"/%3E%3C/g%3E%3C/g%3E%3C/svg%3E');
-                opacity: 0.5;
-                z-index: 0;
-                pointer-events: none;
-            }
-        </style>
-    </head>
-    <body>
-        <div class="main-content">
-            <div class="addon-card">
-                <div class="addon-logo">
-                    📺
-                </div>
-                <h1>${manifest.name}</h1>
-                <div class="version">Version ${manifest.version}</div>
-                <p class="description">
-                    ${manifest.description}
-                </p>
-                
-                <div class="providers-title">Active Providers</div>
-                <div class="providers-list">
-                    ${providersHtml}
-                </div>
+app.get('/configure', (req, res) => {
+    sendConfigurePage(res);
+});
 
-                <div class="config-panel">
-                    <div class="config-panel-title">EasyProxy</div>
-                    <label class="config-toggle" for="easyProxyUrl">
-                        <div style="width: 100%;">
-                            <strong>EasyProxy URL</strong>
-                            <input class="config-input" type="url" id="easyProxyUrl" name="easyProxyUrl" placeholder="https://your-proxy.example.com">
-                        </div>
-                    </label>
-                    <label class="config-toggle" for="easyProxyPassword">
-                        <div style="width: 100%;">
-                            <strong>EasyProxy Password</strong>
-                            <input class="config-input" type="text" id="easyProxyPassword" name="easyProxyPassword" placeholder="your api password (optional)">
-                        </div>
-                    </label>
-                </div>
+app.get('/:config/configure', (req, res) => {
+    sendConfigurePage(res, parseConfigPathParam(req.params.config));
+});
 
-                <a id="installLink" href="#" class="install-btn">INSTALL ADDON</a>
-                <button id="copyLink" type="button" class="copy-btn">📋 Copy Link</button>
-            </div>
-        </div>
+app.get('/manifest.json', (req, res) => {
+    sendManifest(res);
+});
 
-        <div class="footer">
-            Powered by <a href="https://github.com/realbestia1/" target="_blank">realbestia</a>
-        </div>
-
-        <script>
-            // Dynamic Install Link
-            const currentHost = window.location.host;
-            const protocol = window.location.protocol;
-            const installBtn = document.getElementById('installLink');
-            const copyBtn = document.getElementById('copyLink');
-            const easyCatalogsToggle = document.getElementById('easyCatalogsLangIt');
-            const easyProxyUrlInput = document.getElementById('easyProxyUrl');
-            const easyProxyPasswordInput = document.getElementById('easyProxyPassword');
-            let manifestUrl = '';
-            let stremioUrl = '';
-
-            function getConfigPath() {
-                const config = {};
-                if (easyCatalogsToggle && easyCatalogsToggle.checked) {
-                    config.easyCatalogsLangIt = 'on';
-                }
-                if (easyProxyUrlInput) {
-                    let normalizedEasyProxyUrl = easyProxyUrlInput.value.trim();
-                    while (normalizedEasyProxyUrl.endsWith('/')) {
-                        normalizedEasyProxyUrl = normalizedEasyProxyUrl.slice(0, -1);
-                    }
-                    if (normalizedEasyProxyUrl) {
-                        config.easyProxyUrl = normalizedEasyProxyUrl;
-                    }
-                }
-                if (easyProxyPasswordInput) {
-                    const normalizedEasyProxyPassword = easyProxyPasswordInput.value.trim();
-                    if (normalizedEasyProxyPassword) {
-                        config.easyProxyPassword = normalizedEasyProxyPassword;
-                    }
-                }
-                if (Object.keys(config).length === 0) return '';
-                const encodedConfig = encodeURIComponent(JSON.stringify(config));
-                return \`/\${encodedConfig}\`;
-            }
-
-            function updateInstallLinks() {
-                const configPath = getConfigPath();
-                manifestUrl = \`\${protocol}//\${currentHost}\${configPath}/manifest.json\`;
-                stremioUrl = \`stremio://\${currentHost}\${configPath}/manifest.json\`;
-                installBtn.href = stremioUrl;
-            }
-            if (easyCatalogsToggle) {
-                easyCatalogsToggle.addEventListener('change', updateInstallLinks);
-            }
-            if (easyProxyUrlInput) {
-                easyProxyUrlInput.addEventListener('input', updateInstallLinks);
-            }
-            if (easyProxyPasswordInput) {
-                easyProxyPasswordInput.addEventListener('input', updateInstallLinks);
-            }
-            updateInstallLinks();
-            // Copy Link Logic
-            copyBtn.addEventListener('click', async () => {
-                try {
-                    const showCopySuccess = () => {
-                        const originalText = copyBtn.innerText;
-                        copyBtn.innerText = '? Copied!';
-                        copyBtn.style.borderColor = '#4CAF50';
-                        copyBtn.style.color = '#4CAF50';
-                        
-                        setTimeout(() => {
-                            copyBtn.innerText = originalText;
-                            copyBtn.style.borderColor = '';
-                            copyBtn.style.color = '';
-                        }, 2000);
-                    };
-
-                    if (navigator.clipboard && window.isSecureContext) {
-                        await navigator.clipboard.writeText(manifestUrl);
-                    } else {
-                        const textArea = document.createElement('textarea');
-                        textArea.value = manifestUrl;
-                        textArea.setAttribute('readonly', '');
-                        textArea.style.position = 'fixed';
-                        textArea.style.top = '-9999px';
-                        textArea.style.left = '-9999px';
-                        document.body.appendChild(textArea);
-                        textArea.focus();
-                        textArea.select();
-                        const copied = document.execCommand('copy');
-                        document.body.removeChild(textArea);
-                        if (!copied) throw new Error('Fallback copy failed');
-                    }
-
-                    showCopySuccess();
-                } catch (err) {
-                    console.error('Failed to copy: ', err);
-                }
-            });
-            
-            console.log("Manifest URL:", manifestUrl);
-        </script>
-    </body>
-    </html>
-    `;
-    res.send(landingHtml);
+app.get('/:config/manifest.json', (req, res) => {
+    sendManifest(res);
 });
 
 app.use('/', addonRouter);
 
-// API per Nuvio / Client-side
 app.get('/resolve/:provider', async (req, res) => {
     const { provider: providerName } = req.params;
-    const { id, type, s, ep } = req.query;
+    const { id, type, s, ep, format } = req.query;
 
     if (!id || !type) {
         return res.status(400).json({ error: 'Missing parameters (id, type)' });
@@ -2142,18 +1974,23 @@ app.get('/resolve/:provider', async (req, res) => {
         return res.status(404).json({ error: `Provider '${providerName}' not found` });
     }
 
-    console.log(`[API] Richiesta remota ${providerName}: ${type} ${id} ${s}x${ep}`);
+    console.log(`[API] Richiesta remota ${providerName}: ${type} ${id} ${s}x${ep} [format=${format || "streams"}]`);
 
     try {
         const season = parseInt(s) || 1;
         const episode = parseInt(ep) || 1;
 
-        // Risolviamo il contesto (necessario per TMDB/Kitsu mapping)
         const requestContext = await resolveProviderRequestContext(type, id, season, episode, 'it');
         const providerContext = buildProviderRequestContext(requestContext);
+        if (providerContext) providerContext.format = format || "streams";
 
-        const streams = await provider.getStreams(id, type, season, episode, providerContext);
-        res.json({ streams });
+        const result = await provider.getStreams(id, type, season, episode, providerContext);
+
+        if (format === 'links') {
+            res.json({ links: result.links || [] });
+        } else {
+            res.json({ streams: Array.isArray(result) ? result : (result.streams || []) });
+        }
     } catch (e) {
         console.error(`[API] Errore risoluzione remota ${providerName}:`, e.message);
         res.status(500).json({ error: e.message });
@@ -2162,32 +1999,65 @@ app.get('/resolve/:provider', async (req, res) => {
 
 const PORT = process.env.PORT || 7000;
 
-async function warmupProviders() {
-    console.log('[Warmup] Avvio riscaldamento provider...');
-    const targets = [
-        { name: 'Guardoserie', url: 'https://guardoserie.team/wp-admin/admin-ajax.php' },
-        { name: 'Cinemacity', url: 'https://cinemacity.cc/index.php?do=search' }
-    ];
+function loadValidCfSession(provider, maxAgeMs = 2 * 60 * 60 * 1000) {
+    try {
+        const sessionPath = path.join(process.cwd(), `cf-session-${provider}.json`);
+        if (!fs.existsSync(sessionPath)) return null;
+        const stat = fs.statSync(sessionPath);
+        const data = JSON.parse(fs.readFileSync(sessionPath, 'utf8'));
+        if (!data || !data.userAgent) return null;
+        const timestamp = Number(data.timestamp || 0) || stat.mtimeMs;
+        const ageMs = Date.now() - timestamp;
+        if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > maxAgeMs) return null;
+        return { data, ageMs, sessionPath };
+    } catch {
+        return null;
+    }
+}
 
-    for (const target of targets) {
-        try {
-            console.log(`[Warmup] Riscaldamento ${target.name}...`);
-            await getClearance(target.url, target.name.toLowerCase());
-            console.log(`[Warmup] ${target.name} pronto!`);
-        } catch (e) {
-            console.error(`[Warmup] Errore riscaldamento ${target.name}:`, e.message);
+function hasAnyValidCfSession(providersToCheck) {
+    return providersToCheck.some((provider) => loadValidCfSession(provider));
+}
+
+function describeValidCfSession(providersToCheck) {
+    for (const provider of providersToCheck) {
+        const session = loadValidCfSession(provider);
+        if (session) {
+            return `${provider} (${Math.round(session.ageMs / 60000)} min)`;
         }
+    }
+    return null;
+}
+
+async function warmupGuardoserie() {
+    const forceWarmup = String(process.env.FORCE_CF_WARMUP || '').trim().toLowerCase() === '1';
+    const validSession = describeValidCfSession(['guardoserie']);
+    if (!forceWarmup && validSession) {
+        console.log(`[Warmup] Guardoserie saltato: sessione CF valida gia presente (${validSession}).`);
+        return;
+    }
+
+    try {
+        console.log('[Warmup] Riscaldamento Guardoserie...');
+        await getClearance('https://guardoserie.run/wp-admin/admin-ajax.php', 'guardoserie', {
+            maxTimeout: readPositiveIntEnv('CF_WARMUP_MAX_TIMEOUT_MS', 35000),
+            requestTimeout: readPositiveIntEnv('CF_WARMUP_REQUEST_TIMEOUT_MS', 45000)
+        });
+        console.log('[Warmup] Guardoserie pronto!');
+    } catch (e) {
+        console.error(`[Warmup] Errore riscaldamento Guardoserie: ${e.message}`);
     }
 }
 
 let server;
 (async () => {
-    // Avvia FlareSolverr prima di accettare connessioni
+    // Avvia FlareSolverr come fallback runtime; warmup iniziale solo per Guardoserie.
     try {
         await flareManager.start();
         console.log('[FlareSolverr] Pronto.');
-        // Avvia riscaldamento in background
-        warmupProviders().catch(e => console.error('[Warmup] Errore critico:', e));
+        warmupGuardoserie().catch(e => {
+            console.error('[Warmup] Errore critico Guardoserie:', e);
+        });
     } catch (e) {
         console.error('[Addon] Errore avvio FlareSolverr:', e.message);
     }

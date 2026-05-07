@@ -96,10 +96,15 @@ var require_common = __commonJS({
       }
       return p;
     }
+    function isFlareSolverrBlockedError(error) {
+      const message = String(error && error.message || error || "");
+      return /FlareSolverr in cooldown|Request failed with status code 500|Cloudflare has blocked/i.test(message);
+    }
     module2.exports = {
       USER_AGENT,
       unPack,
-      getProxiedUrl
+      getProxiedUrl,
+      isFlareSolverrBlockedError
     };
   }
 });
@@ -109,48 +114,86 @@ var require_mixdrop = __commonJS({
   "src/extractors/mixdrop.js"(exports2, module2) {
     var { USER_AGENT, unPack } = require_common();
     function isMixDropDisabled() {
-      if (typeof global !== "undefined" && global && global.DISABLE_MIXDROP === true) {
-        return true;
-      }
       const rawEnv = typeof process !== "undefined" && process && process.env && typeof process.env.DISABLE_MIXDROP === "string" ? process.env.DISABLE_MIXDROP.trim().toLowerCase() : "";
       return ["1", "true", "yes", "on"].includes(rawEnv);
+    }
+    function normalizeUrl(url, baseUrl) {
+      try {
+        return new URL(String(url || ""), baseUrl).toString();
+      } catch (e) {
+        return null;
+      }
+    }
+    function extractPackedStream(html) {
+      const packedRegex = /eval\(function\(p,a,c,k,e,d\)\s*\{.*?\}\s*\('(.*?)',(\d+),(\d+),'(.*?)'\.split\('\|'\),(\d+),(\{\})\)\)/;
+      const match = packedRegex.exec(String(html || ""));
+      if (!match) return null;
+      const p = match[1];
+      const a = parseInt(match[2]);
+      const c = parseInt(match[3]);
+      const k = match[4].split("|");
+      const unpacked = unPack(p, a, c, k, null, {});
+      const wurlMatch = unpacked.match(/wurl\s*=\s*["']([^"']+)["']/);
+      if (!wurlMatch) return null;
+      let streamUrl = wurlMatch[1];
+      if (streamUrl.startsWith("//")) streamUrl = "https:" + streamUrl;
+      return streamUrl;
+    }
+    function extractEmbedUrl(html, pageUrl) {
+      const match = String(html || "").match(/<iframe\b[^>]+src=["']([^"']*\/e\/[^"']+)["']/i);
+      if (match) return normalizeUrl(match[1], pageUrl);
+      const converted = String(pageUrl || "").replace(/\/f\//i, "/e/");
+      return converted !== pageUrl ? converted : null;
     }
     function extractMixDrop(url, refererBase = "https://m1xdrop.net/") {
       return __async(this, null, function* () {
         if (isMixDropDisabled()) return null;
         try {
           if (url.startsWith("//")) url = "https:" + url;
-          const response = yield fetch(url, {
-            headers: {
-              "User-Agent": USER_AGENT,
-              "Referer": refererBase
-            }
+          const fetchHtml = (targetUrl, referer) => __async(null, null, function* () {
+            const response = yield fetch(targetUrl, {
+              headers: {
+                "User-Agent": USER_AGENT,
+                "Referer": referer
+              }
+            });
+            if (!response.ok) return null;
+            return {
+              url: response.url || targetUrl,
+              html: yield response.text()
+            };
           });
-          if (!response.ok) return null;
-          const html = yield response.text();
-          const packedRegex = /eval\(function\(p,a,c,k,e,d\)\s*\{.*?\}\s*\('(.*?)',(\d+),(\d+),'(.*?)'\.split\('\|'\),(\d+),(\{\})\)\)/;
-          const match = packedRegex.exec(html);
-          if (match) {
-            const p = match[1];
-            const a = parseInt(match[2]);
-            const c = parseInt(match[3]);
-            const k = match[4].split("|");
-            const unpacked = unPack(p, a, c, k, null, {});
-            const wurlMatch = unpacked.match(/wurl="([^"]+)"/);
-            if (wurlMatch) {
-              let streamUrl = wurlMatch[1];
-              if (streamUrl.startsWith("//")) streamUrl = "https:" + streamUrl;
-              return {
-                url: streamUrl,
-                headers: {
-                  "User-Agent": USER_AGENT,
-                  "Referer": "https://m1xdrop.net/",
-                  "Origin": "https://m1xdrop.net"
-                }
-              };
+          let page = yield fetchHtml(url, refererBase);
+          if (!page) return null;
+          let streamUrl = extractPackedStream(page.html);
+          let pageUrl = page.url;
+          if (!streamUrl) {
+            const embedUrl = extractEmbedUrl(page.html, pageUrl);
+            if (embedUrl && embedUrl !== pageUrl) {
+              const embedPage = yield fetchHtml(embedUrl, pageUrl);
+              if (embedPage) {
+                page = embedPage;
+                pageUrl = embedPage.url;
+                streamUrl = extractPackedStream(embedPage.html);
+              }
             }
           }
-          return null;
+          if (!streamUrl) return null;
+          const origin = (() => {
+            try {
+              return new URL(pageUrl).origin;
+            } catch (e) {
+              return "https://m1xdrop.net";
+            }
+          })();
+          return {
+            url: streamUrl,
+            headers: {
+              "User-Agent": USER_AGENT,
+              "Referer": pageUrl,
+              "Origin": origin
+            }
+          };
         } catch (e) {
           console.error("[Extractors] MixDrop extraction error:", e);
           return null;
@@ -7407,7 +7450,7 @@ var require_formatter = __commonJS({
       else if (quality === "1080p") quality = "\u{1F680} FHD";
       else if (quality === "720p") quality = "\u{1F4BF} HD";
       else if (quality === "576p" || quality === "480p" || quality === "360p" || quality === "240p") quality = "\u{1F4A9} Low Quality";
-      else if (!quality || ["auto", "unknown", "unknow"].includes(String(quality).toLowerCase())) quality = "Unknow";
+      else if (!quality || ["auto", "unknown", "unknow"].includes(String(quality).toLowerCase())) quality = "\u{1F4BF} HD";
       let title = `\u{1F4C1} ${stream.title || "Stream"}`;
       let language = stream.language;
       if (!language) {
@@ -7483,7 +7526,6 @@ var require_formatter = __commonJS({
 var require_animeunity = __commonJS({
   "src/animeunity/index.js"(exports2, module2) {
     "use strict";
-    var cheerio = require("cheerio");
     var { extractVixCloud } = require_extractors();
     var { getProxiedUrl } = require_common();
     var { formatStream } = require_formatter();
@@ -7708,8 +7750,35 @@ var require_animeunity = __commonJS({
       let text = String(rawTitle || "").trim();
       if (!text) return null;
       text = text.replace(/\s*-\s*AnimeUnity.*$/i, "").replace(/\s+Streaming.*$/i, "").trim();
-      text = text.replace(/\s*[\[(]\s*(?:SUB\s*ITA|ITA|SUB|DUB(?:BED)?|DOPPIATO)\s*[\])]\s*/gi, " ").replace(/\s*[-–_|:]\s*(?:SUB\s*ITA|ITA|SUB|DUB(?:BED)?|DOPPIATO)\s*$/gi, "").replace(/\s{2,}/g, " ").replace(/\s*[-–_|:]\s*$/g, "").trim();
+      text = text.replace(/\s*[\[(]\s*(?:SUB\s*ITA|ITA|SUB|DUB(?:BED)?|DOPPIATO)\s*[\])]\s*/gi, " ").replace(/\s*[-\u2013_|:]\s*(?:SUB\s*ITA|ITA|SUB|DUB(?:BED)?|DOPPIATO)\s*$/gi, "").replace(/\s{2,}/g, " ").replace(/\s*[-\u2013_|:]\s*$/g, "").trim();
       return text || null;
+    }
+    function decodeHtmlEntities(value) {
+      return String(value || "").replace(/&quot;/gi, '"').replace(/&#34;/g, '"').replace(/&#39;/g, "'").replace(/&apos;/gi, "'").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/&nbsp;/gi, " ");
+    }
+    function stripHtmlTags(value) {
+      return decodeHtmlEntities(String(value || "").replace(/<[^>]*>/g, " ")).replace(/\s+/g, " ").trim();
+    }
+    function getTagAttribute(tag, attrName) {
+      const escaped = String(attrName || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const regex = new RegExp(`${escaped}\\s*=\\s*(["'])([\\s\\S]*?)\\1`, "i");
+      const match = String(tag || "").match(regex);
+      return match ? decodeHtmlEntities(match[2]) : null;
+    }
+    function findFirstTag(html, tagName, attrPattern = "") {
+      const regex = new RegExp(`<${tagName}\\b${attrPattern}[\\s\\S]*?>`, "i");
+      const match = String(html || "").match(regex);
+      return match ? match[0] : "";
+    }
+    function getMetaContent(html, propertyValue) {
+      const escaped = String(propertyValue || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const tag = findFirstTag(html, "meta", `(?=[^>]*(?:property|name)\\s*=\\s*["']${escaped}["'])`);
+      return getTagAttribute(tag, "content");
+    }
+    function getFirstTagText(html, tagName) {
+      const regex = new RegExp(`<${tagName}\\b[^>]*>([\\s\\S]*?)<\\/${tagName}>`, "i");
+      const match = String(html || "").match(regex);
+      return match ? stripHtmlTags(match[1]) : "";
     }
     function parseVideoPlayerJson(rawValue, fallback) {
       const text = String(rawValue || "").trim();
@@ -7758,7 +7827,7 @@ var require_animeunity = __commonJS({
       return parsePositiveInt(match == null ? void 0 : match[1]);
     }
     function resolveLanguageEmoji(sourceTag) {
-      return String(sourceTag || "").toUpperCase() === "ITA" ? "????" : "????";
+      return String(sourceTag || "").toUpperCase() === "ITA" ? "\u{1F1EE}\u{1F1F9}" : "\u{1F1EF}\u{1F1F5}";
     }
     function extractQualityHint(value) {
       const text = String(value || "");
@@ -7970,12 +8039,11 @@ var require_animeunity = __commonJS({
       });
     }
     function parseAnimePage(html, fallback = {}) {
-      const $ = cheerio.load(html);
-      const vp = $("video-player").first();
-      const animeData = parseVideoPlayerJson(vp.attr("anime"), {});
-      const episodeData = parseVideoPlayerJson(vp.attr("episode"), null);
-      const episodesData = parseVideoPlayerJson(vp.attr("episodes"), []);
-      const pageTitle = $("meta[property='og:title']").attr("content") || $("title").first().text().trim() || null;
+      const vp = findFirstTag(html, "video-player");
+      const animeData = parseVideoPlayerJson(getTagAttribute(vp, "anime"), {});
+      const episodeData = parseVideoPlayerJson(getTagAttribute(vp, "episode"), null);
+      const episodesData = parseVideoPlayerJson(getTagAttribute(vp, "episodes"), []);
+      const pageTitle = getMetaContent(html, "og:title") || getFirstTagText(html, "title") || null;
       const titleCandidates = [
         fallback.title,
         animeData == null ? void 0 : animeData.title_it,
@@ -8004,7 +8072,7 @@ var require_animeunity = __commonJS({
           embedUrl: (entry == null ? void 0 : entry.embed_url) || null
         }))
       );
-      const currentEmbedUrl = toAbsoluteUrl(vp.attr("embed_url"));
+      const currentEmbedUrl = toAbsoluteUrl(getTagAttribute(vp, "embed_url"));
       if (currentEmbedUrl && episodes.length > 0) {
         if (episodeData == null ? void 0 : episodeData.id) {
           const currentId = parsePositiveInt(episodeData.id);
