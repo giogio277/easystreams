@@ -56,7 +56,9 @@ async function extractMixDrop(url, refererBase = 'https://m1xdrop.net/') {
       const response = await fetch(targetUrl, {
         headers: {
           "User-Agent": USER_AGENT,
-          "Referer": referer
+          "Referer": referer,
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
+          "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7"
         }
       });
       if (!response.ok) return null;
@@ -87,15 +89,19 @@ async function extractMixDrop(url, refererBase = 'https://m1xdrop.net/') {
     if (!streamUrl) return null;
 
     const origin = (() => {
-      try { return new URL(pageUrl).origin; } catch { return 'https://m1xdrop.net'; }
+      try { return new URL(pageUrl).origin; } catch { return ''; }
     })();
 
     return {
       url: streamUrl,
+      referer: pageUrl,
+      userAgent: USER_AGENT,
       headers: {
         'User-Agent': USER_AGENT,
         'Referer': pageUrl,
-        'Origin': origin
+        'Origin': origin,
+        'Accept': '*/*',
+        'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7'
       }
     };
   } catch (e) {

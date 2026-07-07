@@ -3,8 +3,6 @@ const USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, l
 
 async function checkQualityFromPlaylist(url, headers = {}) {
   try {
-    if (!url.includes('.m3u8')) return null;
-    
     const finalHeaders = { ...headers };
     if (!finalHeaders['User-Agent']) {
         finalHeaders['User-Agent'] = USER_AGENT;
@@ -20,6 +18,8 @@ async function checkQualityFromPlaylist(url, headers = {}) {
       if (!response.ok) return null;
       const text = await response.text();
 
+      if (!text.startsWith('#EXTM3U')) return null;
+
       const quality = checkQualityFromText(text);
       
       if (quality) console.log(`[QualityHelper] Detected ${quality} from playlist: ${url}`);
@@ -32,6 +32,25 @@ async function checkQualityFromPlaylist(url, headers = {}) {
   } catch (e) {
     return null;
   }
+}
+
+async function checkItalianAudioInPlaylist(url, headers = {}) {
+  try {
+    const finalHeaders = { ...headers };
+    if (!finalHeaders['User-Agent']) finalHeaders['User-Agent'] = USER_AGENT;
+    const timeoutConfig = createTimeoutSignal(3000);
+    try {
+      const response = await fetch(url, { headers: finalHeaders, signal: timeoutConfig.signal });
+      if (!response.ok) return false;
+      const text = await response.text();
+      if (!text.startsWith('#EXTM3U')) return false;
+      const hasAudioTags = /#EXT-X-MEDIA:TYPE=AUDIO/i.test(text);
+      if (!hasAudioTags) return true;
+      return /#EXT-X-MEDIA:TYPE=AUDIO.*(?:LANGUAGE="it"|LANGUAGE="ita"|NAME="Italian"|NAME="Ita")/i.test(text);
+    } finally {
+      if (typeof timeoutConfig.cleanup === "function") timeoutConfig.cleanup();
+    }
+  } catch { return false; }
 }
 
 function checkQualityFromText(text) {
@@ -58,4 +77,4 @@ function getQualityFromUrl(url) {
     return null; // Don't default to HD, return null so provider can decide fallback
 }
 
-module.exports = { checkQualityFromPlaylist, getQualityFromUrl, checkQualityFromText };
+module.exports = { checkQualityFromPlaylist, getQualityFromUrl, checkQualityFromText, checkItalianAudioInPlaylist };

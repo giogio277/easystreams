@@ -81,13 +81,14 @@ var require_formatter = __commonJS({
         stream == null ? void 0 : stream.server,
         providerName
       ].filter(Boolean).join(" ").toLowerCase();
-      if (text.includes("mixdrop") || text.includes("m1xdrop") || text.includes("mxcontent")) {
-        return true;
-      }
-      if (text.includes("loadm") || text.includes("loadm.cam")) {
+      if (text.includes("loadm") || text.includes("loadm.cam") || text.includes("mixdrop") || text.includes("mxcontent")) {
         return true;
       }
       return false;
+    }
+    function normalizeProviderId(providerName) {
+      const normalized = String(providerName || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+      return normalized || void 0;
     }
     function formatStream2(stream, providerName) {
       let quality = stream.quality || "";
@@ -99,10 +100,14 @@ var require_formatter = __commonJS({
       else if (!quality || ["auto", "unknown", "unknow"].includes(String(quality).toLowerCase())) quality = "\u{1F4BF} HD";
       let title = `\u{1F4C1} ${stream.title || "Stream"}`;
       let language = stream.language;
-      if (!language) {
-        if (stream.name && (stream.name.includes("SUB ITA") || stream.name.includes("SUB"))) language = "\u{1F1EF}\u{1F1F5} \u{1F1EE}\u{1F1F9}";
-        else if (stream.title && (stream.title.includes("SUB ITA") || stream.title.includes("SUB"))) language = "\u{1F1EF}\u{1F1F5} \u{1F1EE}\u{1F1F9}";
-        else language = "\u{1F1EE}\u{1F1F9}";
+      if (language === "Italian") {
+        language = "\u{1F1EE}\u{1F1F9}";
+      } else if (stream.name && (stream.name.includes("SUB ITA") || stream.name.includes("SUB"))) {
+        language = "\u{1F1EF}\u{1F1F5} \u{1F1EE}\u{1F1F9}";
+      } else if (stream.title && (stream.title.includes("SUB ITA") || stream.title.includes("SUB"))) {
+        language = "\u{1F1EF}\u{1F1F5} \u{1F1EE}\u{1F1F9}";
+      } else if (language === void 0 || language === null) {
+        language = "";
       }
       let details = [];
       if (stream.size) details.push(`\u{1F4E6} ${stream.size}`);
@@ -136,16 +141,19 @@ var require_formatter = __commonJS({
         behaviorHints.proxyHeaders.request = finalHeaders;
         behaviorHints.headers = finalHeaders;
       }
+      const providerExplicitNotWebReady = stream.behaviorHints && "notWebReady" in stream.behaviorHints;
       const shouldForceNotWebReady = shouldForceNotWebReadyForPlugin(stream, providerName, finalHeaders, behaviorHints);
       if (!isStreamingCommunityProvider && shouldForceNotWebReady) {
         behaviorHints.notWebReady = true;
-      } else {
+      } else if (!providerExplicitNotWebReady) {
         delete behaviorHints.notWebReady;
       }
       const finalName = pName;
       let finalTitle = `\u{1F4C1} ${stream.title || "Stream"}`;
       if (desc) finalTitle += ` | ${desc}`;
       if (language) finalTitle += ` | ${language}`;
+      const playbackReferer = stream.referer || (finalHeaders == null ? void 0 : finalHeaders.Referer) || (finalHeaders == null ? void 0 : finalHeaders.referer);
+      const playbackUserAgent = stream.userAgent || (finalHeaders == null ? void 0 : finalHeaders["User-Agent"]) || (finalHeaders == null ? void 0 : finalHeaders["user-agent"]);
       return __spreadProps(__spreadValues({}, stream), {
         // Keep original properties
         name: finalName,
@@ -160,6 +168,9 @@ var require_formatter = __commonJS({
         // Mark as formatted
         _nuvio_formatted: true,
         behaviorHints,
+        provider: stream.provider || normalizeProviderId(providerName),
+        referer: playbackReferer,
+        userAgent: playbackUserAgent,
         // Explicitly ensure root headers are preserved for Nuvio
         headers: finalHeaders
       });
@@ -236,7 +247,6 @@ var require_quality_helper = __commonJS({
     function checkQualityFromPlaylist2(_0) {
       return __async(this, arguments, function* (url, headers = {}) {
         try {
-          if (!url.includes(".m3u8")) return null;
           const finalHeaders = __spreadValues({}, headers);
           if (!finalHeaders["User-Agent"]) {
             finalHeaders["User-Agent"] = USER_AGENT2;
@@ -249,6 +259,7 @@ var require_quality_helper = __commonJS({
             });
             if (!response.ok) return null;
             const text = yield response.text();
+            if (!text.startsWith("#EXTM3U")) return null;
             const quality = checkQualityFromText(text);
             if (quality) console.log(`[QualityHelper] Detected ${quality} from playlist: ${url}`);
             return quality;
@@ -259,6 +270,28 @@ var require_quality_helper = __commonJS({
           }
         } catch (e) {
           return null;
+        }
+      });
+    }
+    function checkItalianAudioInPlaylist(_0) {
+      return __async(this, arguments, function* (url, headers = {}) {
+        try {
+          const finalHeaders = __spreadValues({}, headers);
+          if (!finalHeaders["User-Agent"]) finalHeaders["User-Agent"] = USER_AGENT2;
+          const timeoutConfig = createTimeoutSignal2(3e3);
+          try {
+            const response = yield fetch(url, { headers: finalHeaders, signal: timeoutConfig.signal });
+            if (!response.ok) return false;
+            const text = yield response.text();
+            if (!text.startsWith("#EXTM3U")) return false;
+            const hasAudioTags = /#EXT-X-MEDIA:TYPE=AUDIO/i.test(text);
+            if (!hasAudioTags) return true;
+            return /#EXT-X-MEDIA:TYPE=AUDIO.*(?:LANGUAGE="it"|LANGUAGE="ita"|NAME="Italian"|NAME="Ita")/i.test(text);
+          } finally {
+            if (typeof timeoutConfig.cleanup === "function") timeoutConfig.cleanup();
+          }
+        } catch (e) {
+          return false;
         }
       });
     }
@@ -282,7 +315,7 @@ var require_quality_helper = __commonJS({
       if (urlPath.includes("360")) return "360p";
       return null;
     }
-    module2.exports = { checkQualityFromPlaylist: checkQualityFromPlaylist2, getQualityFromUrl, checkQualityFromText };
+    module2.exports = { checkQualityFromPlaylist: checkQualityFromPlaylist2, getQualityFromUrl, checkQualityFromText, checkItalianAudioInPlaylist };
   }
 });
 
@@ -316,6 +349,8 @@ var BLOCKED_DOMAINS = [
   "narutolegend.it"
 ];
 function getCached(map, key) {
+  const isReactNative = typeof navigator !== "undefined" && navigator.product === "ReactNative" || typeof global !== "undefined" && global.HermesInternal;
+  if (isReactNative) return void 0;
   const entry = map.get(key);
   if (!entry) return void 0;
   if (entry.expiresAt <= Date.now()) {
@@ -325,6 +360,20 @@ function getCached(map, key) {
   return entry.value;
 }
 function setCached(map, key, value, ttlMs) {
+  const isReactNative = typeof navigator !== "undefined" && navigator.product === "ReactNative" || typeof global !== "undefined" && global.HermesInternal;
+  if (isReactNative) return value;
+  for (const [k, entry] of map.entries()) {
+    if (entry.expiresAt <= Date.now()) {
+      map.delete(k);
+    }
+  }
+  const MAX_CACHE_ENTRIES = 500;
+  if (map.size >= MAX_CACHE_ENTRIES) {
+    const oldestKey = map.keys().next().value;
+    if (oldestKey !== void 0) {
+      map.delete(oldestKey);
+    }
+  }
   map.set(key, { value, expiresAt: Date.now() + ttlMs });
   return value;
 }

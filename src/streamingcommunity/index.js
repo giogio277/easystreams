@@ -1,10 +1,18 @@
 function getStreamingCommunityBaseUrl() {
-  return "https://vixsrc.to";
+  return "https://calpezz8.space";
 }
 
 const { formatStream } = require('../formatter.js');
 require('../fetch_helper.js');
 const { checkQualityFromText } = require('../quality_helper.js');
+
+const STREAMINGCOMMUNITY_PROXY = (typeof process !== 'undefined' && process.env.STREAMINGCOMMUNITY_PROXY) || '';
+let ProxyAgent = null;
+try {
+    ProxyAgent = require('undici').ProxyAgent;
+} catch (_) {
+    ProxyAgent = null;
+}
 
 function safeRequire(modulePath) {
   try {
@@ -221,10 +229,25 @@ async function getStreams(id, type, season, episode, providerContext = null) {
     return [];
   }
 
+
+
   try {
+    const proxySocks = STREAMINGCOMMUNITY_PROXY || (typeof process !== 'undefined' && process.env.SOCKS5_PROXY) || '';
+    const useProxyFetch = proxySocks && typeof ProxyAgent === 'function';
+    let proxyAgent = null;
+    if (useProxyFetch) {
+      try {
+        proxyAgent = new ProxyAgent(proxySocks);
+        console.log(`[StreamingCommunity] Using SOCKS5 proxy for fetches`);
+      } catch (e) {
+        console.warn(`[StreamingCommunity] Failed to create proxy agent: ${e.message}`);
+      }
+    }
+
     console.log(`[StreamingCommunity] Fetching API: ${apiUrl}`);
     const response = await fetch(apiUrl, {
-      headers: commonHeaders
+      headers: commonHeaders,
+      dispatcher: proxyAgent || undefined
     });
     if (!response.ok) {
       console.error(`[StreamingCommunity] Failed to fetch page: ${response.status}`);
@@ -237,6 +260,65 @@ async function getStreams(id, type, season, episode, providerContext = null) {
       return [];
     }
 
+    let embedHtml;
+    try {
+      console.log(`[StreamingCommunity] Fetching embed: ${embedUrl}`);
+      const embedResponse = await fetch(embedUrl, {
+        headers: getEmbedHeaders(embedUrl),
+        dispatcher: proxyAgent || undefined
+      });
+      if (!embedResponse.ok) {
+        console.error(`[StreamingCommunity] Failed to fetch embed: ${embedResponse.status}`);
+        return [];
+      }
+      embedHtml = await embedResponse.text();
+    } catch (e) {
+      console.error(`[StreamingCommunity] Failed to fetch embed: ${e.message}`);
+      return [];
+    }
+    if (!embedHtml) return [];
+
+    const masterPlaylist = extractMasterPlaylistFromEmbedHtml(embedHtml);
+    if (!masterPlaylist) {
+      console.log("[StreamingCommunity] Could not find playlist info in HTML");
+      return [];
+    }
+
+    const separator = masterPlaylist.url.includes('?') ? '&' : '?';
+    const streamUrl = `${masterPlaylist.url}.m3u8${separator}token=${encodeURIComponent(masterPlaylist.token)}&expires=${encodeURIComponent(masterPlaylist.expires)}&h=1&lang=it`;
+    const streamHeaders = getPlaylistHeaders(embedUrl);
+    console.log(`[StreamingCommunity] Final stream URL: ${streamUrl}`);
+
+    let quality = "1080p";
+    let hasItalianAudio = false;
+    let playlistFetched = false;
+    try {
+      const playlistResponse = await fetch(streamUrl, {
+        headers: streamHeaders,
+        dispatcher: proxyAgent || undefined
+      });
+      if (playlistResponse.ok) {
+        playlistFetched = true;
+        const playlistText = await playlistResponse.text();
+        if (playlistText) {
+          hasItalianAudio = /#EXT-X-MEDIA:TYPE=AUDIO.*(?:LANGUAGE="it"|LANGUAGE="ita"|NAME="Italian"|NAME="Ita")/i.test(playlistText);
+          const detected = checkQualityFromText(playlistText);
+          if (detected) quality = detected;
+          const originalLanguageItalian = metadata && (metadata.original_language === 'it' || metadata.original_language === 'ita');
+          if (!hasItalianAudio && !originalLanguageItalian) {
+            console.log(`[StreamingCommunity] No Italian audio found. Showing without flag.`);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn(`[StreamingCommunity] Playlist pre-check failed, continuing:`, e);
+    }
+
+    const normalizedQuality = getQualityFromName(quality);
+    const hasOriginalItalian = metadata && (metadata.original_language === 'it' || metadata.original_language === 'ita');
+    const isItalianAudio = playlistFetched ? hasItalianAudio : true;
+    const resultLanguage = (isItalianAudio || hasOriginalItalian) ? 'Italian' : '';
+
     if (providerContext?.proxyUrl) {
       const rawPageUrl = url.endsWith("/") ? url : `${url}/`;
       console.log(`[StreamingCommunity] Proxy enabled, returning raw page URL: ${rawPageUrl}`);
@@ -245,78 +327,33 @@ async function getStreams(id, type, season, episode, providerContext = null) {
         title: finalDisplayName,
         url: rawPageUrl,
         easyProxySourceUrl: rawPageUrl,
-        // Stremio addon uses EasyProxy path for StreamingCommunity, so expose default quality here too.
-        quality: "1080p",
-        type: "direct",
-        behaviorHints: {
-          notWebReady: false
-        }
-      };
-
-      return [formatStream(result, "StreamingCommunity")].filter(s => s !== null);
-    }
-
-    console.log(`[StreamingCommunity] Fetching embed: ${embedUrl}`);
-    const embedResponse = await fetch(embedUrl, {
-      headers: getEmbedHeaders(embedUrl)
-    });
-    if (!embedResponse.ok) {
-      console.error(`[StreamingCommunity] Failed to fetch embed: ${embedResponse.status}`);
-      return [];
-    }
-
-    const embedHtml = await embedResponse.text();
-    if (!embedHtml) return [];
-
-    const masterPlaylist = extractMasterPlaylistFromEmbedHtml(embedHtml);
-    if (masterPlaylist) {
-      const streamUrl = `${masterPlaylist.url}?token=${encodeURIComponent(masterPlaylist.token)}&expires=${encodeURIComponent(masterPlaylist.expires)}&h=1&lang=it`;
-      const streamHeaders = getPlaylistHeaders(embedUrl);
-      console.log(`[StreamingCommunity] Final stream URL: ${streamUrl}`);
-
-      // StreamingCommunity generally serves FHD when playlist does not expose a clear resolution tag.
-      let quality = "1080p";
-      try {
-        const playlistResponse = await fetch(streamUrl, {
-          headers: streamHeaders
-        });
-        if (playlistResponse.ok) {
-          const playlistText = await playlistResponse.text();
-          const hasItalian = /#EXT-X-MEDIA:TYPE=AUDIO.*(?:LANGUAGE="it"|LANGUAGE="ita"|NAME="Italian"|NAME="Ita")/i.test(playlistText);
-          const detected = checkQualityFromText(playlistText);
-          if (detected) quality = detected;
-
-          const originalLanguageItalian = metadata && (metadata.original_language === 'it' || metadata.original_language === 'ita');
-
-          if (!hasItalian && !originalLanguageItalian) {
-            console.log(`[StreamingCommunity] No Italian audio found. Checking fallback.`);
-            const fallbackOk = await hasGuardaFallbackResults(id, normalizedType, resolvedSeason, episode, providerContext);
-            if (!fallbackOk) return [];
-          }
-        }
-      } catch (e) {
-        console.warn(`[StreamingCommunity] Playlist pre-check failed, continuing:`, e);
-      }
-
-      const normalizedQuality = getQualityFromName(quality);
-      const result = {
-        name: `StreamingCommunity`,
-        title: finalDisplayName,
-        url: streamUrl,
-        easyProxySourceUrl: embedUrl,
         quality: normalizedQuality,
         type: "direct",
-        headers: streamHeaders,
+        language: resultLanguage,
         behaviorHints: {
           notWebReady: false
         }
       };
-
       return [formatStream(result, "StreamingCommunity")].filter(s => s !== null);
-    } else {
-      console.log("[StreamingCommunity] Could not find playlist info in HTML");
-      return [];
     }
+
+
+
+    const result = {
+      name: `StreamingCommunity`,
+      title: finalDisplayName,
+      url: streamUrl,
+      easyProxySourceUrl: embedUrl,
+      quality: normalizedQuality,
+      type: "direct",
+      headers: streamHeaders,
+      behaviorHints: {
+        notWebReady: false
+      },
+      language: resultLanguage
+    };
+
+    return [formatStream(result, "StreamingCommunity")].filter(s => s !== null);
   } catch (error) {
     console.error("[StreamingCommunity] Error:", error);
     return [];

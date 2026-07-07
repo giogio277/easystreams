@@ -24,7 +24,8 @@ function getGuardaHdBaseUrl() {
 const TMDB_API_KEY = "68e094699525b18a70bab2f86b1fa706";
 const USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36";
 
-const { extractMixDrop, extractDropLoad, extractSuperVideo, extractStreamHG } = require('../extractors');
+const { extractMixDrop } = require('../extractors/mixdrop');
+const { extractStreamHG } = require('../extractors/streamhg');
 require('../fetch_helper.js');
 const { formatStream } = require('../formatter.js');
 const { checkQualityFromPlaylist, getQualityFromUrl } = require('../quality_helper.js');
@@ -208,7 +209,8 @@ function getStreams(id, type, season, episode) {
                 easyProxySourceUrl: streamUrl,
                 headers: extracted.headers,
                 quality: normalizedQuality,
-                type: "direct"
+                type: "direct",
+                language: 'Italian'
               });
             }
           } else if (streamUrl.includes("dhcplay") || streamUrl.includes("vibuxer")) {
@@ -227,7 +229,8 @@ function getStreams(id, type, season, episode) {
                 easyProxySourceUrl: streamUrl,
                 headers: extracted.headers,
                 quality: normalizedQuality,
-                type: "direct"
+                type: "direct",
+                language: 'Italian'
               });
             }
           } else if (streamUrl.includes("dropload") || streamUrl.includes("dr0pstream")) {

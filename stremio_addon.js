@@ -3,7 +3,7 @@ const { sanitizeLogArgs } = require('./src/utils/log_sanitizer');
 
 try {
     require('dns').setDefaultResultOrder('ipv4first');
-} catch {}
+} catch { }
 
 // Polyfill fetch and related Web APIs
 if (typeof global.Blob === 'undefined') {
@@ -34,14 +34,14 @@ if (!global.fetch) {
 const https = require('https');
 const http = require('http');
 
-const LOG_LEVEL = String(process.env.LOG_LEVEL || 'warn').trim().toLowerCase();
+const LOG_LEVEL = String(process.env.LOG_LEVEL || 'info').trim().toLowerCase();
 const ENABLE_INFO_LOGS = ['debug', 'verbose', 'info'].includes(LOG_LEVEL);
 const VERBOSE_LOGS = ['debug', 'verbose'].includes(LOG_LEVEL);
 
 const PROVIDER_LOG_PREFIXES = [
     '[GuardaHD]',
     '[Guardoserie]',
-    '[CinemaCity]',
+    '[Guardaserie]',
     '[AnimeUnity]',
     '[AnimeWorld]',
     '[AnimeSaturn]',
@@ -61,7 +61,8 @@ console.log = (...args) => {
 console.warn = (...args) => originalConsoleWarn(...sanitizeLogArgs(args));
 console.error = (...args) => originalConsoleError(...sanitizeLogArgs(args));
 
-const flareManager = require('./flare_manager');
+// flareManager removed in favor of Scrapling
+
 const { getClearance, getStats: getFlareStats } = require('./cf_bypass');
 
 function logInfo(...args) {
@@ -98,10 +99,10 @@ function readPositiveIntEnv(name, fallback) {
     return Number.isInteger(value) && value > 0 ? value : fallback;
 }
 
-app.get('/health/flaresolverr', (req, res) => {
+app.get('/health/scrapling', (req, res) => {
     res.json({
         ok: true,
-        flaresolverr: getFlareStats()
+        scrapling: getFlareStats()
     });
 });
 
@@ -165,6 +166,85 @@ app.use((req, res, next) => {
     next();
 });
 
+const RESERVED_SEGMENTS = new Set([
+    'configure',
+    'manifest.json',
+    'resolve',
+    'stream',
+    'meta',
+    'catalog',
+    'subtitles',
+    'favicon.ico',
+    'robots.txt',
+    'health',
+    'static'
+]);
+
+function parseConfig(rawConfig) {
+    if (!rawConfig) return {};
+    
+    let decoded = '';
+    try {
+        decoded = decodeURIComponent(rawConfig).trim();
+    } catch (e) {
+        decoded = rawConfig.trim();
+    }
+    
+    if (!decoded) return {};
+    
+    if (decoded.startsWith('{') && decoded.endsWith('}')) {
+        try {
+            return JSON.parse(decoded);
+        } catch (e) {
+            // Fall through
+        }
+    }
+    
+    const parsed = {};
+    const pairs = decoded.split(/[|;,&]+/);
+    for (const pair of pairs) {
+        const parts = pair.split('=');
+        if (parts.length === 2) {
+            const key = parts[0].trim();
+            const value = parts[1].trim();
+            if (key) {
+                if (value === 'true' || value === 'on' || value === '1') {
+                    parsed[key] = true;
+                } else if (value === 'false' || value === 'off' || value === '0') {
+                    parsed[key] = false;
+                } else {
+                    try {
+                        parsed[key] = JSON.parse(value);
+                    } catch (e) {
+                        parsed[key] = value;
+                    }
+                }
+            }
+        }
+    }
+    return parsed;
+}
+
+// Config Normalization & URL Rewriter Middleware
+app.use((req, res, next) => {
+    const path = req.path;
+    const segments = path.split('/').filter(Boolean);
+    if (segments.length > 0) {
+        const firstSegment = segments[0];
+        if (!RESERVED_SEGMENTS.has(firstSegment)) {
+            const parsedConfig = parseConfig(firstSegment);
+            const encodedConfig = encodeURIComponent(JSON.stringify(parsedConfig));
+            if (encodedConfig !== firstSegment) {
+                const remainingPath = '/' + segments.slice(1).join('/');
+                const newUrl = '/' + encodedConfig + remainingPath;
+                logVerbose(`[Middleware] URL Rewrite: ${req.url} -> ${newUrl}`);
+                req.url = newUrl;
+            }
+        }
+    }
+    next();
+});
+
 // Global timeout configuration
 const FETCH_TIMEOUT = 15000;
 const STREAM_RESPONSE_TIMEOUT = 45000;
@@ -177,6 +257,7 @@ const ENABLE_ANIME_FALLBACK_ON_SERIES = false;
 const ENABLE_ANIME_FALLBACK_ON_MOVIES = false;
 const FORCE_ALL_PROVIDERS = false;
 const ENABLE_TMDB_ANIME_DETECTION = true;
+const DEFAULT_DISABLED_PROVIDERS = new Set([]);
 const TMDB_ANIME_DETECTION_TIMEOUT = 1200;
 const TMDB_ANIME_CACHE_TTL = 21600000;
 const ADDON_CACHE_ENABLED = true;
@@ -452,8 +533,9 @@ function resolveEasyProxyModeFromConfig(config = null) {
 }
 
 function resolveDisabledProvidersFromConfig(config = null) {
+    const hasExplicitDisabledProviders = Object.prototype.hasOwnProperty.call(config || {}, 'disabledProviders');
     const raw = String(config?.disabledProviders || '').trim();
-    if (!raw) return new Set();
+    if (!hasExplicitDisabledProviders) return new Set(DEFAULT_DISABLED_PROVIDERS);
     return new Set(raw.split(',').map((name) => name.trim().toLowerCase()).filter(Boolean));
 }
 
@@ -1169,28 +1251,12 @@ async function resolveProviderRequestContext(type, providerId, season, episode, 
     const isImdbId = /^tt\d+$/i.test(idStr);
     const isKitsuId = /^kitsu:\d+$/i.test(idStr);
     const isTmdbLikeId = idStr.startsWith('tmdb:') || /^\d+$/.test(idStr);
-    const shouldFetchMappingApi =
-        type === 'anime' ||
-        isKitsuId ||
-        isImdbId ||
-        isTmdbLikeId ||
-        ENABLE_SERIES_MAPPING_LOOKUP;
-
     try {
         if (idStr.startsWith('kitsu:')) {
             context.idType = 'kitsu';
             const parts = idStr.split(':');
             if (parts.length >= 2 && /^\d+$/.test(parts[1])) {
                 context.kitsuId = parts[1];
-                let mappingSignalsFound = false;
-                if (shouldFetchMappingApi) {
-                    const byKitsu = await fetchMappingByProvider('kitsu', context.kitsuId, context.requestedSeason, context.requestedEpisode, context.mappingLanguage);
-                    if (byKitsu) {
-                        applyMappingHintsToContext(context, byKitsu);
-                        mappingSignalsFound = hasUsefulMappingSignals(byKitsu);
-                    }
-                }
-                context.mappingLookupMiss = shouldFetchMappingApi && !mappingSignalsFound;
             }
         } else if (idStr.startsWith('tmdb:')) {
             context.idType = 'tmdb';
@@ -1198,20 +1264,9 @@ async function resolveProviderRequestContext(type, providerId, season, episode, 
             if (parts.length >= 2 && /^\d+$/.test(parts[1])) {
                 context.tmdbId = parts[1];
             }
-        } else if (/^tt\d+$/i.test(idStr)) {
+        } else if (isImdbId) {
             context.idType = 'imdb';
             context.imdbId = idStr;
-            let mappingSignalsFound = false;
-
-            if (shouldFetchMappingApi) {
-                const byImdb = await fetchMappingByProvider('imdb', idStr, context.requestedSeason, context.requestedEpisode, context.mappingLanguage);
-                if (byImdb) {
-                    applyMappingHintsToContext(context, byImdb);
-                    mappingSignalsFound = hasUsefulMappingSignals(byImdb);
-                }
-            }
-            context.mappingLookupMiss = shouldFetchMappingApi && !mappingSignalsFound;
-
             if (!context.tmdbId) {
                 const fallbackTmdbId = await fetchTmdbIdFromImdbForCanonicalKey(idStr);
                 if (fallbackTmdbId !== null && fallbackTmdbId !== undefined) {
@@ -1223,11 +1278,42 @@ async function resolveProviderRequestContext(type, providerId, season, episode, 
             context.tmdbId = idStr;
         }
 
-        if (shouldFetchMappingApi && context.tmdbId) {
-            const byTmdb = await fetchMappingByProvider('tmdb', context.tmdbId, context.requestedSeason, context.requestedEpisode, context.mappingLanguage);
-            if (byTmdb) {
-                applyMappingHintsToContext(context, byTmdb);
+        // Detect if it is an anime request
+        let isAnime = type === 'anime' || isKitsuId;
+        if (!isAnime && context.tmdbId) {
+            isAnime = await detectAnimeByTmdb(normalizedType, context);
+        }
+
+        // Only fetch from mapping API if it is anime (or if ENABLE_SERIES_MAPPING_LOOKUP is true)
+        const shouldFetchMappingApi = isAnime || ENABLE_SERIES_MAPPING_LOOKUP;
+
+        if (shouldFetchMappingApi) {
+            let mappingSignalsFound = false;
+
+            if (context.kitsuId) {
+                const byKitsu = await fetchMappingByProvider('kitsu', context.kitsuId, context.requestedSeason, context.requestedEpisode, context.mappingLanguage);
+                if (byKitsu) {
+                    applyMappingHintsToContext(context, byKitsu);
+                    mappingSignalsFound = hasUsefulMappingSignals(byKitsu);
+                }
+            } else if (context.imdbId) {
+                const byImdb = await fetchMappingByProvider('imdb', context.imdbId, context.requestedSeason, context.requestedEpisode, context.mappingLanguage);
+                if (byImdb) {
+                    applyMappingHintsToContext(context, byImdb);
+                    mappingSignalsFound = hasUsefulMappingSignals(byImdb);
+                }
             }
+
+            context.mappingLookupMiss = !mappingSignalsFound;
+
+            if (context.tmdbId) {
+                const byTmdb = await fetchMappingByProvider('tmdb', context.tmdbId, context.requestedSeason, context.requestedEpisode, context.mappingLanguage);
+                if (byTmdb) {
+                    applyMappingHintsToContext(context, byTmdb);
+                }
+            }
+        } else {
+            context.mappingLookupMiss = false;
         }
 
     } catch (error) {
@@ -1328,12 +1414,18 @@ async function resolveCanonicalStreamCacheKey(type, providerId, season, episode,
 const providers = {
     guardahd: require('./src/guardahd/index.js'),
     guardoserie: require('./src/guardoserie/index.js'),
+    vidxgo: require('./src/vidxgo/index.js'),
+    altadefinizionestreaming: require('./src/altadefinizionestreaming/index.js'),
     animeunity: require('./src/animeunity/index.js'),
     animeworld: require('./src/animeworld/index.js'),
     animesaturn: require('./src/animesaturn/index.js'),
     streamingcommunity: require('./src/streamingcommunity/index.js'),
     cinemacity: require('./src/cinemacity/index.js'),
 };
+
+const FALLBACK_PROXY_URL = 'https://edn591-ptn164-gnw494.kristianvenzi.com/extractor/video.m3u8?host=VixCloud&d=';
+
+const EASY_PROXY_REQUIRED_PROVIDERS = new Set(['vidxgo']);
 
 function isLikelyAnimeRequest(type, providerId, requestContext) {
     const normalizedType = String(type || '').toLowerCase();
@@ -1391,27 +1483,27 @@ function getProviderExecutionOrder(type, providerId, requestContext, animeRoutin
     if (normalizedType === 'movie') {
         if (isKitsuRequest) {
             // For Kitsu movies, use anime providers first and keep non-anime fallbacks.
-            plan = ['animeunity', 'animeworld', 'animesaturn', 'guardoserie', 'streamingcommunity', 'guardahd'];
+            plan = ['animeunity', 'animeworld', 'animesaturn', 'guardoserie', 'streamingcommunity', 'cinemacity', 'guardahd'];
         } else if (isImdbRequest) {
             plan = likelyAnime
-                ? ['animeunity', 'animeworld', 'animesaturn', 'guardoserie', 'streamingcommunity', 'guardahd']
-                : ['streamingcommunity', 'guardahd', 'guardoserie', 'cinemacity'];
+                ? ['animeunity', 'animeworld', 'animesaturn', 'guardoserie', 'streamingcommunity', 'cinemacity', 'guardahd']
+                : ['streamingcommunity', 'vidxgo', 'cinemacity', 'guardahd', 'guardoserie', 'altadefinizionestreaming'];
         } else if (likelyAnime || ENABLE_ANIME_FALLBACK_ON_MOVIES) {
             plan = ['animeunity', 'animeworld', 'animesaturn', 'guardoserie'];
         } else {
-            plan = ['streamingcommunity', 'guardahd', 'guardoserie', 'cinemacity'];
+            plan = ['streamingcommunity', 'vidxgo', 'cinemacity', 'guardahd', 'guardoserie', 'altadefinizionestreaming'];
         }
     } else if (normalizedType === 'anime') {
-        plan = ['animeunity', 'animeworld', 'animesaturn', 'guardoserie'];
+        plan = ['animeunity', 'animeworld', 'animesaturn', 'guardoserie', 'vidxgo'];
     } else {
         if (isImdbRequest) {
             plan = likelyAnime
-                ? ['animeunity', 'animeworld', 'animesaturn', 'guardoserie']
-                : ['streamingcommunity', 'guardoserie', 'cinemacity'];
+                ? ['animeunity', 'animeworld', 'animesaturn', 'guardoserie', 'vidxgo']
+                : ['streamingcommunity', 'vidxgo', 'cinemacity', 'guardoserie', 'altadefinizionestreaming'];
         } else if (likelyAnime || ENABLE_ANIME_FALLBACK_ON_SERIES) {
-            plan = ['animeunity', 'animeworld', 'animesaturn', 'guardoserie'];
+            plan = ['animeunity', 'animeworld', 'animesaturn', 'guardoserie', 'vidxgo'];
         } else {
-            plan = ['streamingcommunity', 'guardoserie', 'cinemacity'];
+            plan = ['streamingcommunity', 'vidxgo', 'cinemacity', 'guardoserie', 'altadefinizionestreaming'];
         }
     }
 
@@ -1455,26 +1547,89 @@ const builder = new addonBuilder({
             key: 'disabledProviders',
             type: 'text',
             title: 'Disabled providers (comma-separated)'
+        },
+        {
+            key: 'aiostreamsMode',
+            type: 'checkbox',
+            title: 'AIOStreams compatible layout (name and title format)'
         }
     ]
 });
+
+const mediaYearCache = new Map();
+
+async function fetchMediaYearCached(type, tmdbId, imdbId) {
+    const cacheKey = `${type}:${tmdbId}:${imdbId}`;
+    if (mediaYearCache.has(cacheKey)) {
+        return mediaYearCache.get(cacheKey);
+    }
+
+    let year = null;
+    try {
+        if (tmdbId) {
+            const endpoint = (type === 'movie') ? 'movie' : 'tv';
+            const url = `https://api.themoviedb.org/3/${endpoint}/${tmdbId}?api_key=${TMDB_API_KEY}`;
+            const res = await fetch(url, { timeout: 2000 });
+            if (res.ok) {
+                const data = await res.json();
+                const dateStr = (type === 'movie') ? data.release_date : data.first_air_date;
+                if (dateStr) {
+                    const match = dateStr.match(/^(\d{4})/);
+                    if (match) year = match[1];
+                }
+            }
+        } else if (imdbId) {
+            const url = `https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
+            const res = await fetch(url, { timeout: 2000 });
+            if (res.ok) {
+                const data = await res.json();
+                const movie = data.movie_results?.[0];
+                const show = data.tv_results?.[0];
+                const dateStr = movie ? movie.release_date : (show ? show.first_air_date : null);
+                if (dateStr) {
+                    const match = dateStr.match(/^(\d{4})/);
+                    if (match) year = match[1];
+                }
+            }
+        }
+    } catch (e) {
+        console.warn(`[Addon] Error fetching year from TMDB: ${e.message}`);
+    }
+
+    if (mediaYearCache.size >= 1000) {
+        const oldestKey = mediaYearCache.keys().next().value;
+        if (oldestKey !== undefined) {
+            mediaYearCache.delete(oldestKey);
+        }
+    }
+    mediaYearCache.set(cacheKey, year);
+    return year;
+}
 
 builder.defineStreamHandler(async ({ type, id, config = {} }) => {
     const mappingLanguage = resolveMappingLanguageFromConfig(config);
     const easyProxyEntries = resolveEasyProxyEntriesFromConfig(config);
     const easyProxyMode = resolveEasyProxyModeFromConfig(config);
-    
+    const aiostreamsMode = normalizeConfigBoolean(config?.aiostreamsMode);
+
     // Pre-select a healthy proxy based on the configured failover/skip logic
     const healthyProxyUrl = await buildEasyProxyUrlWithFailover(easyProxyEntries, easyProxyMode, (url) => url);
     const easyProxyUrl = healthyProxyUrl || (easyProxyEntries[0]?.url || '');
     const easyProxyPassword = easyProxyEntries.find(e => e.url === easyProxyUrl)?.password || easyProxyEntries[0]?.password || '';
     const disabledProviders = resolveDisabledProvidersFromConfig(config);
-    const requestKey = `${type}:${id}:lang:${getMappingLanguageToken(mappingLanguage)}:proxy:${getEasyProxyEntriesToken(easyProxyEntries, easyProxyMode)}:disabled:${getDisabledProvidersToken(disabledProviders)}`;
+    const requestKey = `${type}:${id}:lang:${getMappingLanguageToken(mappingLanguage)}:proxy:${getEasyProxyEntriesToken(easyProxyEntries, easyProxyMode)}:disabled:${getDisabledProvidersToken(disabledProviders)}:aios:${aiostreamsMode ? 1 : 0}`;
     const parsedRequest = parseStremioRequestId(type, id);
     const providerId = parsedRequest.providerId;
     const season = parsedRequest.season;
     const episode = parsedRequest.episode;
     const requestContext = await resolveProviderRequestContext(type, providerId, season, episode, mappingLanguage, parsedRequest.seasonProvided);
+
+    // Resolve the media year from TMDB/IMDb (cached) if AIOStreams Mode is enabled
+    let resolvedMediaYear = null;
+    if (aiostreamsMode) {
+        const imdbId = String(parsedRequest.providerId || '').startsWith('tt') ? parsedRequest.providerId : null;
+        resolvedMediaYear = await fetchMediaYearCached(type, requestContext?.tmdbId, imdbId);
+    }
 
     const bypassSeasonZeroCache = shouldBypassStreamCacheForSeasonZero(type, requestContext);
     const cacheEnabledForRequest = ADDON_CACHE_ENABLED && !bypassSeasonZeroCache;
@@ -1505,7 +1660,7 @@ builder.defineStreamHandler(async ({ type, id, config = {} }) => {
         : season;
     const baseCanonicalCacheKey = await resolveCanonicalStreamCacheKey(type, providerId, season, episode, requestContext, mappingLanguage);
     const canonicalCacheKey = baseCanonicalCacheKey
-        ? `${baseCanonicalCacheKey}:proxy:${getEasyProxyEntriesToken(easyProxyEntries, easyProxyMode)}:disabled:${getDisabledProvidersToken(disabledProviders)}`
+        ? `${baseCanonicalCacheKey}:proxy:${getEasyProxyEntriesToken(easyProxyEntries, easyProxyMode)}:disabled:${getDisabledProvidersToken(disabledProviders)}:aios:${aiostreamsMode ? 1 : 0}`
         : null;
 
     if (cacheEnabledForRequest && canonicalCacheKey && canonicalCacheKey !== requestKey) {
@@ -1568,8 +1723,10 @@ builder.defineStreamHandler(async ({ type, id, config = {} }) => {
         if (animeRoutingFlag && type !== 'anime') {
             logVerbose(`[Stremio] Anime routing enabled for ${type}:${providerId}`);
         }
+        const hasEasyProxy = Boolean(easyProxyUrl);
         const selectedProviders = getProviderExecutionOrder(type, providerId, requestContext, animeRoutingFlag)
-            .filter((name) => !disabledProviders.has(String(name).toLowerCase()));
+            .filter((name) => !disabledProviders.has(String(name).toLowerCase()))
+            .filter((name) => !EASY_PROXY_REQUIRED_PROVIDERS.has(name) || hasEasyProxy);
         if (selectedProviders.length === 0) {
             console.warn('[Stremio] No provider selected for request.');
             return { streams: [] };
@@ -1607,6 +1764,9 @@ builder.defineStreamHandler(async ({ type, id, config = {} }) => {
                     try {
                         const providerContext = buildProviderRequestContext(requestContext);
                         providerContext.proxyUrl = easyProxyUrl;
+                        if (!easyProxyUrl && (name === 'streamingcommunity' || name === 'animeunity')) {
+                            providerContext.proxyUrl = 'fake';
+                        }
                         providerContext.proxyUrls = easyProxyEntries.map((entry) => entry.url);
                         providerContext.proxyEntries = easyProxyEntries;
                         providerContext.proxyMode = easyProxyMode;
@@ -1634,14 +1794,12 @@ builder.defineStreamHandler(async ({ type, id, config = {} }) => {
                         const server = (s.server || "").toLowerCase();
                         const sName = (s.name || "").toLowerCase();
                         const sTitle = (s.title || "").toLowerCase();
-                        const isStreamingCommunityProvider = name === 'streamingcommunity';
-                        const isAnimeUnityProvider = name === 'animeunity';
+                        const isVidxGoProvider = name === 'vidxgo';
                         const hasEasyProxy = Boolean(easyProxyUrl);
-                        const isStreamHgProviderStream = isStreamHgStream(s);
-                        if (isStreamingCommunityProvider && !hasEasyProxy) return false;
-                        if (isAnimeUnityProvider && !hasEasyProxy) return false;
-                        if (isStreamHgProviderStream && !hasEasyProxy) return false;
-                        const canProxyMixdrop = Boolean(easyProxyUrl) && isMixdropStreamUrl(s.url);
+                        if (isVidxGoProvider && !hasEasyProxy) return false;
+                        if (isStreamHgStream(s) && !hasEasyProxy) return false;
+                        const isMixdrop = isMixdropStreamUrl(s.url) || isMixdropStream(s);
+                        const canProxyMixdrop = (hasEasyProxy || isMixdrop) && isMixdrop;
                         // Global filter for specific unwanted servers
                         return (
                             (canProxyMixdrop || (
@@ -1658,30 +1816,39 @@ builder.defineStreamHandler(async ({ type, id, config = {} }) => {
                         let finalStreamUrl = s.url;
                         let proxiedByEasyProxy = false;
                         if (name === 'streamingcommunity') {
-                            finalStreamUrl = await buildEasyProxyUrlWithFailover(
-                                easyProxyEntries,
-                                easyProxyMode,
-                                (proxyUrl, proxyPassword) => buildEasyProxyExtractorUrl(
-                                    proxyUrl,
-                                    proxyPassword,
-                                    'vixsrc',
-                                    s.easyProxySourceUrl || s.url,
-                                    'm3u8'
-                                )
-                            );
-                            proxiedByEasyProxy = finalStreamUrl !== s.url;
+                            if (hasEasyProxy) {
+                                finalStreamUrl = await buildEasyProxyUrlWithFailover(
+                                    easyProxyEntries,
+                                    easyProxyMode,
+                                    (proxyUrl, proxyPassword) => buildEasyProxyExtractorUrl(
+                                        proxyUrl,
+                                        proxyPassword,
+                                        'vixsrc',
+                                        s.easyProxySourceUrl || s.url,
+                                        'm3u8'
+                                    )
+                                );
+                            } else {
+                                finalStreamUrl = FALLBACK_PROXY_URL + encodeURIComponent(s.easyProxySourceUrl || s.url) + '&redirect_stream=true&max_res=true&api_password=mGH5%21%21K8bPdtFDf2';
+                            }
+                            proxiedByEasyProxy = true;
                         } else if (name === 'animeunity') {
-                            finalStreamUrl = await buildEasyProxyUrlWithFailover(
-                                easyProxyEntries,
-                                easyProxyMode,
-                                (proxyUrl, proxyPassword) => buildEasyProxyExtractorUrl(
-                                    proxyUrl,
-                                    proxyPassword,
-                                    'vixcloud',
-                                    s.easyProxySourceUrl || s.url
-                                )
-                            );
-                            proxiedByEasyProxy = finalStreamUrl !== s.url;
+                            const sourceUrl = (s.easyProxySourceUrl || s.url).replace('vixcloud.co', 'calpezz8.space');
+                            if (hasEasyProxy) {
+                                finalStreamUrl = await buildEasyProxyUrlWithFailover(
+                                    easyProxyEntries,
+                                    easyProxyMode,
+                                    (proxyUrl, proxyPassword) => buildEasyProxyExtractorUrl(
+                                        proxyUrl,
+                                        proxyPassword,
+                                        'vixcloud',
+                                        sourceUrl
+                                    )
+                                );
+                            } else {
+                                finalStreamUrl = FALLBACK_PROXY_URL + encodeURIComponent(sourceUrl) + '&redirect_stream=true&max_res=true&api_password=mGH5%21%21K8bPdtFDf2';
+                            }
+                            proxiedByEasyProxy = true;
                         } else if (isStreamHgStream(s)) {
                             finalStreamUrl = await buildEasyProxyUrlWithFailover(
                                 easyProxyEntries,
@@ -1694,31 +1861,137 @@ builder.defineStreamHandler(async ({ type, id, config = {} }) => {
                                 )
                             );
                             proxiedByEasyProxy = finalStreamUrl !== s.url;
-                        } else if (isMixdropStream(s)) {
-                            const mixdropExtension = name === 'guardahd' ? 'mp4' : 'm3u8';
+                        } else if (name === 'vidxgo') {
                             finalStreamUrl = await buildEasyProxyUrlWithFailover(
                                 easyProxyEntries,
                                 easyProxyMode,
                                 (proxyUrl, proxyPassword) => buildEasyProxyExtractorUrl(
                                     proxyUrl,
                                     proxyPassword,
-                                    'mixdrop',
+                                    'vidxgo',
                                     s.easyProxySourceUrl || s.url,
-                                    mixdropExtension
+                                    'm3u8'
                                 )
                             );
                             proxiedByEasyProxy = finalStreamUrl !== s.url;
+                        } else if (isMixdropStream(s)) {
+                            const mixdropExtension = name === 'guardahd' ? 'mp4' : 'm3u8';
+                            if (hasEasyProxy) {
+                                finalStreamUrl = await buildEasyProxyUrlWithFailover(
+                                    easyProxyEntries,
+                                    easyProxyMode,
+                                    (proxyUrl, proxyPassword) => buildEasyProxyExtractorUrl(
+                                        proxyUrl,
+                                        proxyPassword,
+                                        'mixdrop',
+                                        s.easyProxySourceUrl || s.url,
+                                        mixdropExtension
+                                    )
+                                );
+                            } else {
+                                finalStreamUrl = `https://edn591-ptn164-gnw494.kristianvenzi.com/extractor/video.${mixdropExtension}?host=Mixdrop&d=${encodeURIComponent(s.easyProxySourceUrl || s.url)}&redirect_stream=true&max_res=true&api_password=mGH5%21%21K8bPdtFDf2`;
+                            }
+                            proxiedByEasyProxy = true;
                         }
 
                         // For Stremio, we reconstruct the legacy multiline format using metadata
-                        const nameUI = (s.qualityTag && s.qualityTag !== 'Unknown') ? s.qualityTag : (s.providerName || s.name || 'EasyStreams');
-                        const displayTitle = s.originalTitle || s.title || 'Stream';
-                        let titleUI = `📁 ${displayTitle}\n${s.providerName || s.name || 'EasyStreams'}`;
-                        if (s.description) titleUI += ` | ${s.description}`;
-                        if (s.language) {
-                            titleUI += `\n🗣️ ${s.language}  🔍EasyStreams`;
+                        let nameUI, titleUI;
+                        let displayTitle = s.originalTitle || s.title || 'Stream';
+
+                        if (aiostreamsMode && (type === 'series' || type === 'anime')) {
+                            // Strip redundant season/episode patterns (e.g. 1x02, 4x3, S01E02, S1E2, etc.) case-insensitively
+                            displayTitle = displayTitle
+                                .replace(/\b\d{1,2}[xX]\d{1,2}\b/g, '')
+                                .replace(/\b[sS]\d{1,2}[eE]\d{1,2}\b/g, '')
+                                .replace(/\b[sS]\d{1,2}\s+[eE]\d{1,2}\b/g, '')
+                                .replace(/\b[sS]tagione\s*\d{1,2}\b/gi, '')
+                                .replace(/\b[eE]pisodio\s*\d{1,3}\b/gi, '');
+
+                            // Clean up trailing garbage (dashes, spaces, commas, empty parens/brackets)
+                            displayTitle = displayTitle
+                                .replace(/[-\s,]+$/, '')
+                                .replace(/\s*\(\s*\)\s*$/, '')
+                                .replace(/\s*\[\s*\]\s*$/, '')
+                                .trim();
+
+                            if (!displayTitle) {
+                                displayTitle = s.originalTitle || s.title || 'Stream';
+                            }
+                        }
+
+                        let source = s.providerName || s.name || 'EasyStreams';
+                        let resolvedLangFlag = '';
+                        let resolutionForFilename = '';
+
+                        if (aiostreamsMode) {
+                            // Strip any leading emoji (like 📡) so AIOStreams indexerRegex matches the name (Vidxgo, CinemaCity, etc.) perfectly.
+                            source = source.replace(/^[\p{Emoji_Presentation}\s]+|[^\p{L}\p{N}\s]+/gu, '').trim();
+
+                            // AIOStreams formatting
+                            let resolution = '720p';
+                            const qLower = String(s.quality || '').toLowerCase();
+                            if (qLower.includes('2160') || qLower.includes('4k')) resolution = '2160p';
+                            else if (qLower.includes('1080') || qLower.includes('fhd')) resolution = '1080p';
+                            else if (qLower.includes('720') || qLower.includes('hd')) resolution = '720p';
+                            else if (qLower.includes('480') || qLower.includes('sd')) resolution = '480p';
+                            else if (qLower.includes('360')) resolution = '360p';
+                            else if (s.quality) resolution = s.quality;
+
+                            nameUI = `EasyStreams HTTP\n${resolution}`;
+                            
+                            const lines = [`🎬 ${displayTitle} ${resolution}`];
+                            if (s.description) {
+                                const sizeMatch = String(s.description).match(/(\d+(?:\.\d+)?\s*(?:GB|MB|KB|TB))/i);
+                                if (sizeMatch) {
+                                    lines.push(`💾 ${sizeMatch[1]}`);
+                                } else {
+                                    lines.push(`💾 ${s.description}`);
+                                }
+                            }
+                            
+                            // Convert standard language text or codes into country flag emojis
+                            // so that AIOStreams getLanguages parser (flag-based) detects it cleanly.
+                            // Convert standard language text or codes into country flag emojis
+                            // so that AIOStreams getLanguages parser (flag-based) detects it cleanly.
+                            if (s.language) {
+                                const cleanLang = String(s.language).trim().toLowerCase();
+                                if (cleanLang === 'italian' || cleanLang === 'it' || cleanLang === 'ita' || cleanLang.includes('🇮🇹')) {
+                                    resolvedLangFlag = '🇮🇹';
+                                } else if (cleanLang === 'english' || cleanLang === 'en' || cleanLang === 'eng' || cleanLang.includes('🇬🇧') || cleanLang.includes('🇺🇸')) {
+                                    resolvedLangFlag = '🇬🇧';
+                                } else if (cleanLang === 'japanese' || cleanLang === 'ja' || cleanLang === 'jp' || cleanLang === 'jpn' || cleanLang.includes('🇯🇵')) {
+                                    resolvedLangFlag = '🇯🇵';
+                                } else if (cleanLang === 'french' || cleanLang === 'fr' || cleanLang === 'fra' || cleanLang.includes('🇫🇷')) {
+                                    resolvedLangFlag = '🇫🇷';
+                                } else if (cleanLang === 'spanish' || cleanLang === 'es' || cleanLang === 'spa' || cleanLang.includes('🇪🇸')) {
+                                    resolvedLangFlag = '🇪🇸';
+                                } else if (cleanLang === 'german' || cleanLang === 'de' || cleanLang === 'deu' || cleanLang.includes('🇩🇪')) {
+                                    resolvedLangFlag = '🇩🇪';
+                                } else if (/[\u{1F1E6}-\u{1F1FF}]{2}/u.test(s.language)) {
+                                    resolvedLangFlag = s.language;
+                                }
+                            }
+
+                            if (resolvedLangFlag) {
+                                lines.push(`🗣️ ${resolvedLangFlag}`);
+                            } else if (s.language) {
+                                lines.push(`🗣️ ${s.language}`);
+                            }
+
+                            lines.push(`🔗 ${source}`);
+                            titleUI = lines.join('\n');
+
+                            resolutionForFilename = resolution;
                         } else {
-                            titleUI += `\n🔍EasyStreams`;
+                            // Default formatting
+                            nameUI = (s.qualityTag && s.qualityTag !== 'Unknown') ? s.qualityTag : (s.providerName || s.name || 'EasyStreams');
+                            titleUI = `📁 ${displayTitle}\n${s.providerName || s.name || 'EasyStreams'}`;
+                            if (s.description) titleUI += ` | ${s.description}`;
+                            if (s.language) {
+                                titleUI += `\n🗣️ ${s.language}  🔍EasyStreams`;
+                            } else {
+                                titleUI += `\n🔍EasyStreams`;
+                            }
                         }
 
                         const finalBehaviorHints = {
@@ -1727,10 +2000,39 @@ builder.defineStreamHandler(async ({ type, id, config = {} }) => {
                             bingeGroup: name // Consistent grouping by provider name
                         };
 
+                        if (aiostreamsMode && resolutionForFilename) {
+                            // Add release year for movies, and SxxExx format for series/anime.
+                            // This ensures yearMatching (strict) and seasonEpisodeMatching filters in AIOStreams don't filter out the streams.
+                            let filenameYear = '';
+                            const yearMatch = String(s.description || s.title || s.originalTitle || '').match(/\b(19\d{2}|20[0-2]\d)\b/);
+                            if (yearMatch) {
+                                filenameYear = ` ${yearMatch[1]}`;
+                            } else if (resolvedMediaYear) {
+                                filenameYear = ` ${resolvedMediaYear}`;
+                            } else if (requestContext?.releaseYear) {
+                                filenameYear = ` ${requestContext.releaseYear}`;
+                            }
+
+                            let seasonEpisodeStr = '';
+                            if (type === 'series' || type === 'anime') {
+                                const sNum = (requestContext?.requestedSeason !== undefined && requestContext?.requestedSeason !== null) ? requestContext.requestedSeason : season;
+                                const epNum = (requestContext?.requestedEpisode !== undefined && requestContext?.requestedEpisode !== null) ? requestContext.requestedEpisode : episode;
+                                
+                                if (sNum !== undefined && sNum !== null && epNum !== undefined && epNum !== null) {
+                                    const sStr = String(sNum).padStart(2, '0');
+                                    const epStr = String(epNum).padStart(2, '0');
+                                    seasonEpisodeStr = ` S${sStr}E${epStr}`;
+                                }
+                            }
+
+                            finalBehaviorHints.filename = `${displayTitle}${filenameYear}${seasonEpisodeStr} ${resolutionForFilename}.mp4`;
+                        }
+
                         if (proxiedByEasyProxy) {
                             delete finalBehaviorHints.proxyHeaders;
                             delete finalBehaviorHints.headers;
                         }
+
 
                         return {
                             name: nameUI,
@@ -1738,7 +2040,7 @@ builder.defineStreamHandler(async ({ type, id, config = {} }) => {
                             url: finalStreamUrl,
                             behaviorHints: finalBehaviorHints,
                             headers: proxiedByEasyProxy ? undefined : (s.headers || s.behaviorHints?.headers || s.behaviorHints?.proxyHeaders?.request),
-                            language: s.language
+                            language: aiostreamsMode ? (resolvedLangFlag || s.language) : s.language
                         };
                     });
                 const processedStreamsResolved = await Promise.all(processedStreams);
@@ -2029,8 +2331,8 @@ function describeValidCfSession(providersToCheck) {
     return null;
 }
 
-async function warmupGuardoserie() {
-    const forceWarmup = String(process.env.FORCE_CF_WARMUP || '').trim().toLowerCase() === '1';
+async function warmupGuardoserie(force = false) {
+    const forceWarmup = force || String(process.env.FORCE_CF_WARMUP || '').trim().toLowerCase() === '1';
     const validSession = describeValidCfSession(['guardoserie']);
     if (!forceWarmup && validSession) {
         console.log(`[Warmup] Guardoserie saltato: sessione CF valida gia presente (${validSession}).`);
@@ -2039,9 +2341,10 @@ async function warmupGuardoserie() {
 
     try {
         console.log('[Warmup] Riscaldamento Guardoserie...');
-        await getClearance('https://guardoserie.run/wp-admin/admin-ajax.php', 'guardoserie', {
+        await getClearance('https://guardoserie.courses/', 'guardoserie', {
             maxTimeout: readPositiveIntEnv('CF_WARMUP_MAX_TIMEOUT_MS', 35000),
-            requestTimeout: readPositiveIntEnv('CF_WARMUP_REQUEST_TIMEOUT_MS', 45000)
+            requestTimeout: readPositiveIntEnv('CF_WARMUP_REQUEST_TIMEOUT_MS', 45000),
+            waitUntil: 'network_idle'
         });
         console.log('[Warmup] Guardoserie pronto!');
     } catch (e) {
@@ -2051,15 +2354,21 @@ async function warmupGuardoserie() {
 
 let server;
 (async () => {
-    // Avvia FlareSolverr come fallback runtime; warmup iniziale solo per Guardoserie.
     try {
-        await flareManager.start();
-        console.log('[FlareSolverr] Pronto.');
+        // Esegui il warmup iniziale (salta se c'è già una sessione valida su disco)
         warmupGuardoserie().catch(e => {
             console.error('[Warmup] Errore critico Guardoserie:', e);
         });
+
+        // Configura il refresh in background ogni 50 minuti per mantenere i cookie sempre attivi
+        setInterval(() => {
+            console.log('[Warmup] Esecuzione refresh periodico in background...');
+            warmupGuardoserie(true).catch(e => {
+                console.error('[Warmup] Errore durante il refresh periodico:', e.message);
+            });
+        }, 50 * 60 * 1000);
     } catch (e) {
-        console.error('[Addon] Errore avvio FlareSolverr:', e.message);
+        console.error('[Addon] Errore durante warmup:', e.message);
     }
 
     server = app.listen(PORT, () => {
@@ -2070,7 +2379,7 @@ let server;
 // Graceful Shutdown
 process.on('SIGTERM', () => {
     logInfo('[Shutdown] SIGTERM received. Closing server...');
-    flareManager.stop();
+
     server.close(() => {
         logInfo('[Shutdown] Server closed.');
         httpsAgent.destroy();
@@ -2082,7 +2391,7 @@ process.on('SIGTERM', () => {
 
 process.on('SIGINT', () => {
     logInfo('[Shutdown] SIGINT received. Closing server...');
-    flareManager.stop();
+
     server.close(() => {
         logInfo('[Shutdown] Server closed.');
         httpsAgent.destroy();

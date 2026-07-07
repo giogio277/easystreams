@@ -154,7 +154,9 @@ var require_mixdrop = __commonJS({
             const response = yield fetch(targetUrl, {
               headers: {
                 "User-Agent": USER_AGENT2,
-                "Referer": referer
+                "Referer": referer,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7"
               }
             });
             if (!response.ok) return null;
@@ -183,15 +185,19 @@ var require_mixdrop = __commonJS({
             try {
               return new URL(pageUrl).origin;
             } catch (e) {
-              return "https://m1xdrop.net";
+              return "";
             }
           })();
           return {
             url: streamUrl,
+            referer: pageUrl,
+            userAgent: USER_AGENT2,
             headers: {
               "User-Agent": USER_AGENT2,
               "Referer": pageUrl,
-              "Origin": origin
+              "Origin": origin,
+              "Accept": "*/*",
+              "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7"
             }
           };
         } catch (e) {
@@ -549,7 +555,6 @@ var require_quality_helper = __commonJS({
     function checkQualityFromPlaylist2(_0) {
       return __async(this, arguments, function* (url, headers = {}) {
         try {
-          if (!url.includes(".m3u8")) return null;
           const finalHeaders = __spreadValues({}, headers);
           if (!finalHeaders["User-Agent"]) {
             finalHeaders["User-Agent"] = USER_AGENT2;
@@ -562,6 +567,7 @@ var require_quality_helper = __commonJS({
             });
             if (!response.ok) return null;
             const text = yield response.text();
+            if (!text.startsWith("#EXTM3U")) return null;
             const quality = checkQualityFromText(text);
             if (quality) console.log(`[QualityHelper] Detected ${quality} from playlist: ${url}`);
             return quality;
@@ -572,6 +578,28 @@ var require_quality_helper = __commonJS({
           }
         } catch (e) {
           return null;
+        }
+      });
+    }
+    function checkItalianAudioInPlaylist(_0) {
+      return __async(this, arguments, function* (url, headers = {}) {
+        try {
+          const finalHeaders = __spreadValues({}, headers);
+          if (!finalHeaders["User-Agent"]) finalHeaders["User-Agent"] = USER_AGENT2;
+          const timeoutConfig = createTimeoutSignal2(3e3);
+          try {
+            const response = yield fetch(url, { headers: finalHeaders, signal: timeoutConfig.signal });
+            if (!response.ok) return false;
+            const text = yield response.text();
+            if (!text.startsWith("#EXTM3U")) return false;
+            const hasAudioTags = /#EXT-X-MEDIA:TYPE=AUDIO/i.test(text);
+            if (!hasAudioTags) return true;
+            return /#EXT-X-MEDIA:TYPE=AUDIO.*(?:LANGUAGE="it"|LANGUAGE="ita"|NAME="Italian"|NAME="Ita")/i.test(text);
+          } finally {
+            if (typeof timeoutConfig.cleanup === "function") timeoutConfig.cleanup();
+          }
+        } catch (e) {
+          return false;
         }
       });
     }
@@ -595,7 +623,7 @@ var require_quality_helper = __commonJS({
       if (urlPath.includes("360")) return "360p";
       return null;
     }
-    module2.exports = { checkQualityFromPlaylist: checkQualityFromPlaylist2, getQualityFromUrl, checkQualityFromText };
+    module2.exports = { checkQualityFromPlaylist: checkQualityFromPlaylist2, getQualityFromUrl, checkQualityFromText, checkItalianAudioInPlaylist };
   }
 });
 
@@ -7366,7 +7394,8 @@ var require_streamhg = __commonJS({
           streamUrl = resolveAbsoluteUrl(streamUrl, finalUrl);
           if (!streamUrl) return null;
           return {
-            url: streamUrl
+            url: streamUrl,
+            headers: { "Referer": getOrigin(finalUrl) + "/", "User-Agent": USER_AGENT2 }
           };
         } catch (e) {
           console.error("[Extractors] StreamHG extraction error:", e);
@@ -7375,6 +7404,92 @@ var require_streamhg = __commonJS({
       });
     }
     module2.exports = { extractStreamHG };
+  }
+});
+
+// src/extractors/vidxgo.js
+var require_vidxgo = __commonJS({
+  "src/extractors/vidxgo.js"(exports2, module2) {
+    var { USER_AGENT: USER_AGENT2 } = require_common();
+    var VIDXGO_HEADERS = {
+      "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:150.0) Gecko/20100101 Firefox/150.0",
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "en-US,en;q=0.9",
+      "Sec-GPC": "1",
+      "Alt-Used": "v.vidxgo.co",
+      "Connection": "keep-alive",
+      "Upgrade-Insecure-Requests": "1",
+      "Sec-Fetch-Dest": "iframe",
+      "Sec-Fetch-Mode": "navigate",
+      "Sec-Fetch-Site": "none",
+      "DNT": "1",
+      "Priority": "u=0, i"
+    };
+    function xorDecrypt(b64, key) {
+      const decoded = Buffer.from(b64, "base64");
+      const result = Buffer.alloc(decoded.length);
+      for (let i = 0; i < decoded.length; i++) {
+        result[i] = decoded[i] ^ key.charCodeAt(i % key.length);
+      }
+      return result.toString("utf-8");
+    }
+    var XOR_PATTERN = /var\s+\w+\s*=\s*'([\w]+)'\s*,?\s*d\s*=\s*atob\s*\(\s*'([A-Za-z0-9+/=]+)'\s*\)/g;
+    var CURRENT_SRC_PATTERN = /\bcurrentSrc\s*=\s*["'](https?:[^"']+?\.m3u8[^"']*)["']/;
+    var CORRUPT_PLAYER_PATTERN = /player-container[^>]*\bcorrupt\b/i;
+    function extractVidxGo(url, referer = "https://altadefinizione.you/") {
+      return __async(this, null, function* () {
+        try {
+          if (url.startsWith("//")) url = "https:" + url;
+          const headers = __spreadProps(__spreadValues({}, VIDXGO_HEADERS), { "Referer": referer });
+          const resp = yield fetch(url, { headers, redirect: "follow" });
+          if (!resp.ok) {
+            console.warn("[VidxGo] HTTP", resp.status, "for", url);
+            return { url, headers: { "User-Agent": USER_AGENT2, "Referer": referer } };
+          }
+          const html = yield resp.text();
+          let match;
+          XOR_PATTERN.lastIndex = 0;
+          while ((match = XOR_PATTERN.exec(html)) !== null) {
+            try {
+              const decrypted = xorDecrypt(match[2], match[1]);
+              const streamMatch = decrypted.match(CURRENT_SRC_PATTERN);
+              if (streamMatch) {
+                const streamUrl = streamMatch[1].replace(/\\/g, "");
+                const vidxgoOrigin = new URL(url).origin;
+                return {
+                  url: streamUrl,
+                  headers: {
+                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:150.0) Gecko/20100101 Firefox/150.0",
+                    "Referer": url,
+                    "Origin": vidxgoOrigin,
+                    "Accept": "*/*",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Sec-GPC": "1",
+                    "Sec-Fetch-Dest": "empty",
+                    "Sec-Fetch-Mode": "cors",
+                    "Sec-Fetch-Site": "cross-site",
+                    "DNT": "1",
+                    "Priority": "u=0"
+                  }
+                };
+              }
+            } catch (e) {
+              continue;
+            }
+          }
+          if (CORRUPT_PLAYER_PATTERN.test(html)) {
+            console.warn("[VidxGo] Source is marked corrupt or not available");
+            return null;
+          }
+          console.warn("[VidxGo] No stream URL found in page");
+          return { url, headers: { "User-Agent": USER_AGENT2, "Referer": referer } };
+        } catch (e) {
+          console.error("[VidxGo] Extraction error:", e);
+          return null;
+        }
+      });
+    }
+    module2.exports = { extractVidxGo, VIDXGO_HEADERS, CORRUPT_PLAYER_PATTERN };
   }
 });
 
@@ -7391,6 +7506,7 @@ var require_extractors = __commonJS({
     var { extractVixCloud: extractVixCloud2 } = require_vixcloud();
     var { extractLoadm } = require_loadm();
     var { extractStreamHG } = require_streamhg();
+    var { extractVidxGo } = require_vidxgo();
     var { USER_AGENT: USER_AGENT2, unPack } = require_common();
     module2.exports = {
       extractMixDrop,
@@ -7403,6 +7519,7 @@ var require_extractors = __commonJS({
       extractVixCloud: extractVixCloud2,
       extractLoadm,
       extractStreamHG,
+      extractVidxGo,
       USER_AGENT: USER_AGENT2,
       unPack
     };
@@ -7435,13 +7552,14 @@ var require_formatter = __commonJS({
         stream == null ? void 0 : stream.server,
         providerName
       ].filter(Boolean).join(" ").toLowerCase();
-      if (text.includes("mixdrop") || text.includes("m1xdrop") || text.includes("mxcontent")) {
-        return true;
-      }
-      if (text.includes("loadm") || text.includes("loadm.cam")) {
+      if (text.includes("loadm") || text.includes("loadm.cam") || text.includes("mixdrop") || text.includes("mxcontent")) {
         return true;
       }
       return false;
+    }
+    function normalizeProviderId(providerName) {
+      const normalized = String(providerName || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+      return normalized || void 0;
     }
     function formatStream2(stream, providerName) {
       let quality = stream.quality || "";
@@ -7453,10 +7571,14 @@ var require_formatter = __commonJS({
       else if (!quality || ["auto", "unknown", "unknow"].includes(String(quality).toLowerCase())) quality = "\u{1F4BF} HD";
       let title = `\u{1F4C1} ${stream.title || "Stream"}`;
       let language = stream.language;
-      if (!language) {
-        if (stream.name && (stream.name.includes("SUB ITA") || stream.name.includes("SUB"))) language = "\u{1F1EF}\u{1F1F5} \u{1F1EE}\u{1F1F9}";
-        else if (stream.title && (stream.title.includes("SUB ITA") || stream.title.includes("SUB"))) language = "\u{1F1EF}\u{1F1F5} \u{1F1EE}\u{1F1F9}";
-        else language = "\u{1F1EE}\u{1F1F9}";
+      if (language === "Italian") {
+        language = "\u{1F1EE}\u{1F1F9}";
+      } else if (stream.name && (stream.name.includes("SUB ITA") || stream.name.includes("SUB"))) {
+        language = "\u{1F1EF}\u{1F1F5} \u{1F1EE}\u{1F1F9}";
+      } else if (stream.title && (stream.title.includes("SUB ITA") || stream.title.includes("SUB"))) {
+        language = "\u{1F1EF}\u{1F1F5} \u{1F1EE}\u{1F1F9}";
+      } else if (language === void 0 || language === null) {
+        language = "";
       }
       let details = [];
       if (stream.size) details.push(`\u{1F4E6} ${stream.size}`);
@@ -7490,16 +7612,19 @@ var require_formatter = __commonJS({
         behaviorHints.proxyHeaders.request = finalHeaders;
         behaviorHints.headers = finalHeaders;
       }
+      const providerExplicitNotWebReady = stream.behaviorHints && "notWebReady" in stream.behaviorHints;
       const shouldForceNotWebReady = shouldForceNotWebReadyForPlugin(stream, providerName, finalHeaders, behaviorHints);
       if (!isStreamingCommunityProvider && shouldForceNotWebReady) {
         behaviorHints.notWebReady = true;
-      } else {
+      } else if (!providerExplicitNotWebReady) {
         delete behaviorHints.notWebReady;
       }
       const finalName = pName;
       let finalTitle = `\u{1F4C1} ${stream.title || "Stream"}`;
       if (desc) finalTitle += ` | ${desc}`;
       if (language) finalTitle += ` | ${language}`;
+      const playbackReferer = stream.referer || (finalHeaders == null ? void 0 : finalHeaders.Referer) || (finalHeaders == null ? void 0 : finalHeaders.referer);
+      const playbackUserAgent = stream.userAgent || (finalHeaders == null ? void 0 : finalHeaders["User-Agent"]) || (finalHeaders == null ? void 0 : finalHeaders["user-agent"]);
       return __spreadProps(__spreadValues({}, stream), {
         // Keep original properties
         name: finalName,
@@ -7514,6 +7639,9 @@ var require_formatter = __commonJS({
         // Mark as formatted
         _nuvio_formatted: true,
         behaviorHints,
+        provider: stream.provider || normalizeProviderId(providerName),
+        referer: playbackReferer,
+        userAgent: playbackUserAgent,
         // Explicitly ensure root headers are preserved for Nuvio
         headers: finalHeaders
       });
@@ -7551,6 +7679,8 @@ var animeUnityCookies = /* @__PURE__ */ new Map();
 var animeUnityCsrfToken = "";
 var animeUnitySessionWarmupPromise = null;
 function getCached(map, key) {
+  const isReactNative = typeof navigator !== "undefined" && navigator.product === "ReactNative" || typeof global !== "undefined" && global.HermesInternal;
+  if (isReactNative) return void 0;
   const entry = map.get(key);
   if (!entry) return void 0;
   if (entry.expiresAt <= Date.now()) {
@@ -7560,6 +7690,20 @@ function getCached(map, key) {
   return entry.value;
 }
 function setCached(map, key, value, ttlMs) {
+  const isReactNative = typeof navigator !== "undefined" && navigator.product === "ReactNative" || typeof global !== "undefined" && global.HermesInternal;
+  if (isReactNative) return value;
+  for (const [k, entry] of map.entries()) {
+    if (entry.expiresAt <= Date.now()) {
+      map.delete(k);
+    }
+  }
+  const MAX_CACHE_ENTRIES = 500;
+  if (map.size >= MAX_CACHE_ENTRIES) {
+    const oldestKey = map.keys().next().value;
+    if (oldestKey !== void 0) {
+      map.delete(oldestKey);
+    }
+  }
   map.set(key, { value, expiresAt: Date.now() + ttlMs });
   return value;
 }

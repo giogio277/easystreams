@@ -57,15 +57,19 @@ function shouldForceNotWebReadyForPlugin(stream, providerName, headers, behavior
         providerName
     ].filter(Boolean).join(' ').toLowerCase();
 
-    if (text.includes('mixdrop') || text.includes('m1xdrop') || text.includes('mxcontent')) {
-        return true;
-    }
-
-    if (text.includes('loadm') || text.includes('loadm.cam')) {
+    if (text.includes('loadm') || text.includes('loadm.cam') || text.includes('mixdrop') || text.includes('mxcontent')) {
         return true;
     }
 
     return false;
+}
+
+function normalizeProviderId(providerName) {
+    const normalized = String(providerName || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '');
+    return normalized || undefined;
 }
 
 function formatStream(stream, providerName) {
@@ -91,10 +95,14 @@ function formatStream(stream, providerName) {
 
     // Extract language if not present
     let language = stream.language;
-    if (!language) {
-        if (stream.name && (stream.name.includes('SUB ITA') || stream.name.includes('SUB'))) language = '🇯🇵 🇮🇹';
-        else if (stream.title && (stream.title.includes('SUB ITA') || stream.title.includes('SUB'))) language = '🇯🇵 🇮🇹';
-        else language = '🇮🇹';
+    if (language === 'Italian') {
+        language = '🇮🇹';
+    } else if (stream.name && (stream.name.includes('SUB ITA') || stream.name.includes('SUB'))) {
+        language = '🇯🇵 🇮🇹';
+    } else if (stream.title && (stream.title.includes('SUB ITA') || stream.title.includes('SUB'))) {
+        language = '🇯🇵 🇮🇹';
+    } else if (language === undefined || language === null) {
+        language = '';
     }
 
     // Add details
@@ -160,10 +168,11 @@ function formatStream(stream, providerName) {
         behaviorHints.headers = finalHeaders;
     }
 
+    const providerExplicitNotWebReady = stream.behaviorHints && 'notWebReady' in stream.behaviorHints;
     const shouldForceNotWebReady = shouldForceNotWebReadyForPlugin(stream, providerName, finalHeaders, behaviorHints);
     if (!isStreamingCommunityProvider && shouldForceNotWebReady) {
         behaviorHints.notWebReady = true;
-    } else {
+    } else if (!providerExplicitNotWebReady) {
         delete behaviorHints.notWebReady;
     }
 
@@ -171,6 +180,8 @@ function formatStream(stream, providerName) {
     let finalTitle = `📁 ${stream.title || 'Stream'}`;
     if (desc) finalTitle += ` | ${desc}`;
     if (language) finalTitle += ` | ${language}`;
+    const playbackReferer = stream.referer || finalHeaders?.Referer || finalHeaders?.referer;
+    const playbackUserAgent = stream.userAgent || finalHeaders?.['User-Agent'] || finalHeaders?.['user-agent'];
 
     return {
         ...stream, // Keep original properties
@@ -186,6 +197,9 @@ function formatStream(stream, providerName) {
         // Mark as formatted
         _nuvio_formatted: true,
         behaviorHints: behaviorHints,
+        provider: stream.provider || normalizeProviderId(providerName),
+        referer: playbackReferer,
+        userAgent: playbackUserAgent,
         // Explicitly ensure root headers are preserved for Nuvio
         headers: finalHeaders
     };
